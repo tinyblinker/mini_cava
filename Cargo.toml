@@ -4,3 +4,4 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+symphonia = { version = "0.6.1", features = ["aac", "aiff", "alac", "all", "all-codecs", "all-formats", "caf", "exp-subtitle-codecs", "exp-video-codecs", "isomp4", "mp1", "mp2", "mp3", "mpa"] }
