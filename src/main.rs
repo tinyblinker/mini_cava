@@ -1,4 +1,4 @@
-use std::{env, fs::File, path::Path};
+use std::{env, fs::File, path::Path, thread::sleep, time::Duration};
 
 use symphonia::core::{
     codecs::audio::AudioDecoderOptions,
@@ -77,11 +77,15 @@ fn main() {
                 // the f32 sample format in channel interleaved order.
 
                 // ensure the vector is large enough to hold all the samples
-                samples.resize(audio_buf.samples_interleaved(), (f32::MAX + f32::MIN) / 2.0);
+                samples.resize(audio_buf.samples_interleaved(), 0f32);
 
                 // copy the audio sample from the generic buffer to the vector in interleaved
                 // order. The sample format to convert to is inferred from the type of the vec
                 audio_buf.copy_to_slice_interleaved(&mut samples);
+
+                // sleep for a while and show the samples' datas
+                sleep(Duration::from_secs_f32(1.0));
+                println!("The samples(Vec<f32>) = {:?}", samples);
 
                 // Sum up the total number of samples
                 total_sample_count += samples.len();
