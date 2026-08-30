@@ -1,4 +1,4 @@
-use std::{env, fs::File, path::Path, thread::sleep, time::Duration};
+use std::{env, fs::File, path::Path};
 
 use symphonia::core::{
     codecs::audio::{AudioDecoder, AudioDecoderOptions},
@@ -6,6 +6,12 @@ use symphonia::core::{
     io::MediaSourceStream,
     meta::MetadataOptions,
 };
+
+struct AudioInitData {
+    track: Track,
+    decoder: Box<dyn AudioDecoder>,
+    format: Box<dyn FormatReader>,
+}
 
 fn detect_audio_format(args: &Vec<String>) -> Box<dyn FormatReader> {
     // Create a media source.
@@ -32,10 +38,10 @@ fn detect_audio_format(args: &Vec<String>) -> Box<dyn FormatReader> {
     format
 }
 
-fn get_the_track(format: Box<dyn FormatReader>) -> &Track {
+fn get_the_track(format: &mut Box<dyn FormatReader>) -> Track {
     // get the default audio track
     let track = format.default_track(TrackType::Audio).unwrap();
-    track
+    track.clone()
 }
 
 fn create_the_decoder_for_track(track: &Track) -> Box<dyn AudioDecoder> {
@@ -52,12 +58,13 @@ fn create_the_decoder_for_track(track: &Track) -> Box<dyn AudioDecoder> {
 
 fn decode_the_track(
     track: &Track,
-    decoder: Box<dyn AudioDecoder>,
+    decoder: &mut Box<dyn AudioDecoder>,
     format: &mut Box<dyn FormatReader>,
-) -> Vec<f32> {
+) -> () {
     // store the track identifier, we'll use it to filter packages
     let track_id = track.id;
 
+    // some variables about samples
     let mut samples: Vec<f32> = Default::default();
     let mut total_sample_count = 0;
 
@@ -102,15 +109,38 @@ fn decode_the_track(
             }
         }
     }
-    samples
+}
+
+fn init_the_decoder_and_track(args: &Vec<String>) -> AudioInitData {
+    // Input the reference of args,
+    // return an Boxed Object which impl "FormatReader Trait"
+    // (Moved the ownership)
+    let mut format = detect_audio_format(&args);
+
+    // get Track based on the format (Moved the ownership)
+    let track: Track = get_the_track(&mut format);
+
+    // get the decoder based on the track (Moved the ownership)
+    let decoder = create_the_decoder_for_track(&track);
+
+    AudioInitData {
+        track: track,
+        decoder: decoder,
+        format: format,
+    }
 }
 
 fn main() {
     // Get command line arguments
     let args: Vec<String> = env::args().collect();
-    let format = detect_audio_format(&args);
-    let track: &Track = get_the_track(format);
-    let decoder = create_the_decoder_for_track(track);
-    let samples = decode_the_track(&track, decoder, &mut format);
-    println!("The samples(Vec<f32>) = {:?}", samples);
+
+    // Init the decoder and decoder the corresponding audio file
+    let mut audio_init_data = init_the_decoder_and_track(&args);
+    decode_the_track(
+        &audio_init_data.track,
+        &mut audio_init_data.decoder,
+        &mut audio_init_data.format,
+    );
+
+    // 
 }
