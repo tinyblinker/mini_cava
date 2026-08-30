@@ -1,16 +1,98 @@
-use std::{env, fs::File, path::Path};
+use std::{env, f32::consts::PI, fs::File, path::Path};
 
 use symphonia::core::{
-    codecs::audio::{AudioDecoder, AudioDecoderOptions},
-    formats::{probe::Hint, FormatOptions, FormatReader, Track, TrackType},
-    io::MediaSourceStream,
-    meta::MetadataOptions,
+    codecs::audio::{AudioDecoder, AudioDecoderOptions}, dsp::{complex::Complex32, fft}, formats::{FormatOptions, FormatReader, Track, TrackType, probe::Hint}, io::MediaSourceStream, meta::MetadataOptions,
 };
 
 struct AudioInitData {
     track: Track,
     decoder: Box<dyn AudioDecoder>,
     format: Box<dyn FormatReader>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Complex {
+    re: f32,
+    im: f32,
+}
+
+impl Complex {
+    fn new(re: f32, im: f32) -> Self {
+        Self { re: re, im: im }
+    }
+    fn add(self, other: Complex) -> Self {
+        Complex::new(self.re + other.re, self.im + other.im)
+    }
+    fn sub(self, other: Complex) -> Self {
+        Complex::new(self.re - other.re, self.im - other.im)
+    }
+    fn mul(self, other: Complex) -> Self {
+        Complex::new(
+            self.re * other.re - self.im * other.im,
+            self.re * other.im + self.im * other.re,
+        )
+    }
+    fn norm(self) -> f32 {
+        (self.re * self.re + self.im * self.im).sqrt()
+    }
+}
+
+// 迭代基-2 Cooley-Tukey FFT(原地计算,未归一化)
+fn fft(input: &mut [Complex]) {
+    let n = input.len();
+    assert!(n.is_power_of_two(), "N必须是2的幂");
+
+    // 1.位反转置换(bit-reversal permutation)
+    let mut j = 0usize;
+    for i in 1..n {
+        // 对[Complex]中每一个Complex元素做判断然后位置换
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j ^= bit;
+        if i < j {
+            input.swap(i, j);
+        }
+    }
+
+    // 2.蝶形运算(butterfly),子长度从2逐级翻倍
+    let mut len = 2usize;
+    while len <= n {
+        let angle = -2.0 * PI / (len as f32);
+        let w_len = Complex::new(angle.cos(), angle.sin());
+        for i in (0..n).step_by(len) {
+            let mut w = Complex::new(1.0, 0.0);
+            for k in 0..len / 2 {
+                let u = input[i + k];
+                let v = input[i + k + len / 2].mul(w);
+                input[i + k] = u.add(v);
+                input[i + k + len / 2] = u.sub(v);
+                w = w.mul(w_len);
+            }
+        }
+        len <<= 1;
+    }
+}
+
+fn compute_spectrum(frame: &[f32], window: &[f32]) -> Vec<f32> {
+    let n = frame.len();
+    assert_eq!(frame.len(), window.len());
+    assert!(n.is_power_of_two(), "N 必须是 2 的幂");
+
+    // 1. 加窗，构造复数数组（实部为样本，虚部为 0）
+    let mut buffer: Vec<Complex> = frame
+        .iter()
+        .zip(window.iter())
+        .map(|(&x, &w)| Complex::new(x * w, 0.0))
+        .collect();
+
+    // 2. 执行手写 FFT
+    fft(&mut buffer);
+
+    // 3. 求幅度谱，只取 0..=n/2（实信号频谱共轭对称）
+    buffer[..=n / 2].iter().map(|c| c.norm()).collect()
 }
 
 fn detect_audio_format(args: &Vec<String>) -> Box<dyn FormatReader> {
@@ -141,6 +223,4 @@ fn main() {
         &mut audio_init_data.decoder,
         &mut audio_init_data.format,
     );
-
-    // 
 }
