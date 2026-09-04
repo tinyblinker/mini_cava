@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Device, Error, ErrorKind, InputCallbackInfo, SampleFormat, SizedSample, StreamConfig,
@@ -38,9 +39,13 @@ fn main() -> Result<(), anyhow::Error> {
     // init Host and Device
     let host = cpal::host_from_id(cpal::HostId::PipeWire)?;
     let input_device = host
-        .devices()?
-        .find(|d| d.to_string() == "default_sink")
-        .ok_or_else(|| anyhow::Error::msg("Default Sink is not available!"))?;
+        .input_devices()?
+        .find(|d| {
+            d.id()
+                .map(|id| id.to_string() == "default_sink")
+                .unwrap_or(false)
+        })
+        .ok_or(anyhow!("找不到input sink"))?;
     println!("input device: {}", input_device);
 
     // init the config
