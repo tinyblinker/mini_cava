@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 cpal = { version = "0.18.2", features = ["pipewire"] }
+ringbuf = "0.5.1"
+rustfft = "6.4.1"
