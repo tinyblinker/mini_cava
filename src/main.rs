@@ -1,9 +1,7 @@
-use std::ptr::with_exposed_provenance;
-
 use anyhow::anyhow;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    Device, Error, ErrorKind, FromSample, InputCallbackInfo, SampleFormat, SizedSample, Stream,
+    Device, Error, ErrorKind, FromSample, InputCallbackInfo, SampleFormat, SizedSample,
     StreamConfig,
 };
 use ringbuf::{
@@ -47,8 +45,14 @@ where
 
     // "move" 能让闭包捕获的外部变量拿走所有权,而不是继续借用他们
     let input_data_fn = move |data: &[T], _: &InputCallbackInfo| {
-        if producer.push_slice(data) < data.len() {
-            eprintln!("Producing fft input data too slowly!!");
+        let pushed_slice_cnt = producer.push_slice(data);
+        println!(
+            "pushed_slice_cnt = {:?}, data.len() = {:?}.",
+            pushed_slice_cnt,
+            data.len()
+        );
+        if pushed_slice_cnt < data.len() {
+            eprintln!("Producing fft input data too quickly!!");
         }
     };
 
@@ -72,7 +76,7 @@ where
 
         // 此处有问题,poped_data_len 始终 = 0
         if poped_data_len < poped_data.len() {
-            eprintln!("Consuming fft input data too slowly!!");
+            eprintln!("Consuming fft input data too quickly!!");
         }
         println!("poped_data_len = {:?}", poped_data_len);
         let mut buffer: Vec<Complex<f32>> = poped_data
