@@ -12,6 +12,19 @@ use ringbuf::{
 };
 use rustfft::{num_complex::Complex, FftPlanner};
 
+// 封装一个只在cargo run(debug)下执行的debug_print()函数
+#[cfg(debug_assertions)]
+macro_rules! debug_println {
+    ($($args:tt)*) => {
+        println!($($args)*);
+    }
+}
+#[cfg(not(debug_assertions))]
+macro_rules! debug_println {
+    ($($args:tt)*) => {};
+}
+
+// 定义FFT_SIZE常数
 const FFT_SIZE: usize = 1024;
 
 fn clean_the_screen() -> () {
@@ -37,12 +50,12 @@ fn display_fft_buffer(buffer: Vec<Complex<f32>>, config: StreamConfig) -> () {
         .iter()
         .map(|fft_complex| fft_complex.norm())
         .collect();
-    println!("fft_data.len() = {:?}", fft_data.len());
+    debug_println!("fft_data.len() = {:?}", fft_data.len());
 
     // 定义Vec<f32>(长度FFT_SIZE)中每一个数字是一个bin(视为cava显示中的一根柱子)
     // 每两个bin之间相隔的频率等于sample_rate / FFT_SIZE
     let freq_atom: f32 = config.sample_rate as f32 / FFT_SIZE as f32;
-    println!("freq_atom = {:?}", freq_atom);
+    debug_println!("freq_atom = {:?}", freq_atom);
 
     // 清屏并显示(超级草率地)
     clean_the_screen();
@@ -71,7 +84,7 @@ where
     // "move" 能让闭包捕获的外部变量拿走所有权,而不是继续借用他们
     let input_data_fn = move |data: &[T], _: &InputCallbackInfo| {
         let pushed_slice_cnt = producer.push_slice(data);
-        println!(
+        debug_println!(
             "pushed_slice_cnt = {:?}, data.len() = {:?}.",
             pushed_slice_cnt,
             data.len()
@@ -82,12 +95,12 @@ where
     };
 
     // Build streams.
-    println!(
+    debug_println!(
         "Attempting to build input stream with {} samples and `{config:?}`.",
         T::FORMAT
     );
     let input_stream = input_device.build_input_stream(config, input_data_fn, err_fn, None)?;
-    println!("Successfully built streams.");
+    debug_println!("Successfully built streams.");
 
     // play the stream(should be alive in this thread always!)
     input_stream.play()?;
@@ -107,7 +120,7 @@ where
         // vars about poped data
         let mut poped_data = vec![T::EQUILIBRIUM; required_samples];
         let poped_data_len = consumer.pop_slice(&mut poped_data);
-        println!("poped_data_len = {:?}", poped_data_len);
+        debug_println!("poped_data_len = {:?}", poped_data_len);
 
         // convert the data to satisfy the buffer
         let mut buffer: Vec<Complex<f32>> = poped_data
@@ -119,9 +132,9 @@ where
                 )
             })
             .collect();
-        println!("buffer(before) = {:?}", buffer[10]);
+        debug_println!("buffer[10](before) = {:?}", buffer[10]);
         fft.process(&mut buffer);
-        println!("buffer(after) = {:?}", buffer[10]);
+        debug_println!("buffer[10](after) = {:?}", buffer[10]);
 
         // display the fft buffer
         display_fft_buffer(buffer, config);
@@ -139,11 +152,11 @@ fn main() -> Result<(), anyhow::Error> {
                 .unwrap_or(false)
         })
         .ok_or(anyhow!("Cannot find the \"default_sink\"!"))?;
-    println!("input device: {}", input_device);
+    debug_println!("input device: {}", input_device);
 
     // init the config
     let input_config = input_device.default_input_config()?;
-    println!(
+    debug_println!(
         "sample rate: {} Hz, channels: {}, format: {:?}",
         input_config.sample_rate(),
         input_config.channels(),
