@@ -6,8 +6,8 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 cpal = { version = "0.18.2", features = ["pipewire"] }
+crossterm = "0.29.0"
+log = "0.4.34"
 ringbuf = "0.5.1"
 rustfft = "6.4.1"
-
-[features]
-debug = []
+simplelog = "0.12.2"
