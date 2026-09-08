@@ -13,7 +13,7 @@ use anyhow::anyhow;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Device, Error, ErrorKind, FromSample, InputCallbackInfo, SampleFormat, SizedSample, Stream,
-    StreamConfig,
+    StreamConfig, SupportedStreamConfig,
 };
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -122,8 +122,8 @@ where
     Ok(input_stream)
 }
 
+/// CPAL: init Host and Device
 fn init_device() -> Device {
-    // CPAL: init Host and Device
     let host = cpal::host_from_id(cpal::HostId::PipeWire).unwrap();
     let input_device = host
         .devices()
@@ -144,8 +144,8 @@ struct MyRingData {
     c_b: MyConsumer<Complex<f32>>,
 }
 
+/// Create RingBuffer for "input_data_fn" (producer), for the "RustFFT"(consumer)
 fn create_ring() -> MyRingData {
-    // Create RingBuffer for "input_data_fn" (producer), for the "RustFFT"(consumer)
     let ring_pcm_fft = HeapRb::<f32>::new(RING_CAPACITY_CPAL_FFT);
     let ring_fft_ui = HeapRb::<Complex<f32>>::new(RING_CAPACITY_FFT_UI);
     let (producer_a, consumer_a) = ring_pcm_fft.split();
@@ -158,31 +158,35 @@ fn create_ring() -> MyRingData {
     }
 }
 
-fn main() -> Result<(), anyhow::Error> {
-    let mut ring_data = create_ring();
-    
-    // 申明线程退出信号(shutdown)
-    let shutdown = Arc::new(AtomicBool::new(false));
+/// CPAL: init input_config
+fn init_input_config(input_device: &Device) -> Result<SupportedStreamConfig, anyhow::Error> {
+    Ok(input_device.default_input_config()?)
+}
 
-    // 初始化日志输出
-    let _ = WriteLogger::init(
+/// CPAL get the input_device and input_config
+fn init_cpal() -> Result<(Device, SupportedStreamConfig), anyhow::Error> {
+    let input_device = init_device();
+    let input_config = init_input_config(&input_device)?;
+    Ok((input_device, input_config))
+}
+
+/// 初始化日志输出
+fn init_logger() -> Result<(), anyhow::Error> {
+    WriteLogger::init(
         LevelFilter::Info,
         Config::default(),
         File::create("my_cava.log").unwrap(),
-    );
+    )?;
     log::info!("Hello logger!");
     log::error!("This is when errors happended in logger!");
+    Ok(())
+}
 
-    // CPAL get the device and config
-    let input_device = init_device();
-    let input_config = input_device.default_input_config()?;
-    debug_println!(
-        "sample rate: {} Hz, channels: {}, format: {:?}",
-        input_config.sample_rate(),
-        input_config.channels(),
-        input_config.sample_format()
-    );
-
+fn make_stream_cpal(
+    input_device: &Device,
+    input_config: &SupportedStreamConfig,
+    p_a: MyProducer<f32>,
+) -> Result<Stream, anyhow::Error> {
     // 开始执行(保活stream即可,自有多线程调度)
     let stream = match input_config.sample_format() {
         // SampleFormat::I8 => run::<i8>(&input_device, input_config.into()),
@@ -193,11 +197,28 @@ fn main() -> Result<(), anyhow::Error> {
         // SampleFormat::U16 => run::<u16>(&input_device, input_config.into()),
         // SampleFormat::U32 => run::<u32>(&input_device, input_config.into()),
         // SampleFormat::U64 => run::<u64>(&input_device, input_config.into()),
-        SampleFormat::F32 => run::<f32>(&input_device, input_config.into(), ring_data.p_a),
+        SampleFormat::F32 => run::<f32>(&input_device, (input_config).clone().into(), p_a),
         // SampleFormat::F64 => run::<f64>(&input_device, input_config.into()),
         sample_format => panic!("Unsupported sample format '{sample_format}'"),
     }?;
+    Ok(stream)
+}
+
+// 需要保活stream!!!!,不能放任跑出作用域后隐式drop(stream)
+fn play_stream_cpal(stream: &Stream) -> Result<(), anyhow::Error> {
     stream.play()?;
+    Ok(())
+}
+
+fn main() -> Result<(), anyhow::Error> {
+    init_logger()?;
+    let mut ring_data = create_ring();
+    let (input_device, input_config) = init_cpal()?;
+    let stream = make_stream_cpal(&input_device, &input_config, ring_data.p_a)?;
+    play_stream_cpal(&stream)?;
+
+    // 申明线程退出信号(shutdown)
+    let shutdown = Arc::new(AtomicBool::new(false));
 
     // spawn the thread for fft
     let shutdown_worker_a = Arc::clone(&shutdown);
