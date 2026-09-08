@@ -46,6 +46,9 @@ type MyProducer<T> = ringbuf::wrap::caching::Caching<
     false,
 >;
 
+type MyConsumer<T> =
+    ringbuf::wrap::caching::Caching<Arc<ringbuf::SharedRb<ringbuf::storage::Heap<T>>>, false, true>;
+
 // 定义常数
 const FFT_SIZE: usize = 1024;
 const RING_CAPACITY_CPAL_FFT: usize = FFT_SIZE * 40;
@@ -60,7 +63,7 @@ fn err_fn(err: Error) {
     }
 }
 
-fn display_fft_buffer(buffer: Vec<Complex<f32>>, config: StreamConfig) -> () {
+fn display_fft_buffer(buffer: &Vec<Complex<f32>>, config: StreamConfig) -> () {
     // fft_data(transferred to Vec<f32>)
     let fft_data: Vec<f32> = buffer
         .iter()
@@ -134,12 +137,29 @@ fn init_device() -> Device {
     input_device.unwrap()
 }
 
-fn main() -> Result<(), anyhow::Error> {
+struct MyRingData {
+    p_a: MyProducer<f32>,
+    c_a: MyConsumer<f32>,
+    p_b: MyProducer<Complex<f32>>,
+    c_b: MyConsumer<Complex<f32>>,
+}
+
+fn create_ring() -> MyRingData {
     // Create RingBuffer for "input_data_fn" (producer), for the "RustFFT"(consumer)
     let ring_pcm_fft = HeapRb::<f32>::new(RING_CAPACITY_CPAL_FFT);
     let ring_fft_ui = HeapRb::<Complex<f32>>::new(RING_CAPACITY_FFT_UI);
-    let (producer_a, mut consumer_a) = ring_pcm_fft.split();
-    let (mut producer_b, mut consumer_b) = ring_fft_ui.split();
+    let (producer_a, consumer_a) = ring_pcm_fft.split();
+    let (producer_b, consumer_b) = ring_fft_ui.split();
+    MyRingData {
+        p_a: producer_a,
+        c_a: consumer_a,
+        p_b: producer_b,
+        c_b: consumer_b,
+    }
+}
+
+fn main() -> Result<(), anyhow::Error> {
+    let mut ring_data = create_ring();
     
     // 申明线程退出信号(shutdown)
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -173,16 +193,14 @@ fn main() -> Result<(), anyhow::Error> {
         // SampleFormat::U16 => run::<u16>(&input_device, input_config.into()),
         // SampleFormat::U32 => run::<u32>(&input_device, input_config.into()),
         // SampleFormat::U64 => run::<u64>(&input_device, input_config.into()),
-        SampleFormat::F32 => run::<f32>(&input_device, input_config.into(), producer_a),
+        SampleFormat::F32 => run::<f32>(&input_device, input_config.into(), ring_data.p_a),
         // SampleFormat::F64 => run::<f64>(&input_device, input_config.into()),
         sample_format => panic!("Unsupported sample format '{sample_format}'"),
     }?;
     stream.play()?;
 
-    // atomicBool
-    let shutdown_worker_a = Arc::clone(&shutdown);
-
     // spawn the thread for fft
+    let shutdown_worker_a = Arc::clone(&shutdown);
     let handle_fft = thread::spawn(move || -> Result<(), anyhow::Error> {
         // RustFFT(PCM_data -> 频域数据<频谱>)
         let mut planner = FftPlanner::<f32>::new();
@@ -190,16 +208,21 @@ fn main() -> Result<(), anyhow::Error> {
         let channels = input_config.channels();
         let required_samples = FFT_SIZE * (channels as usize);
 
+        // vars about poped data
+        // let mut poped_data = vec![T::EQUILIBRIUM; required_samples];
+        let mut poped_data = vec![0.0f32; required_samples];
+        let mut poped_data_len: usize = 0;
+        debug_println!("poped_data_len = {:?}", poped_data_len);
+
         loop {
             // Data is consumed too fast!!! should be wait here
-            while consumer_a.occupied_len() < required_samples {
+            while ring_data.c_a.occupied_len() < required_samples {
                 thread::sleep(Duration::from_millis(1));
             }
 
             // vars about poped data
             // let mut poped_data = vec![T::EQUILIBRIUM; required_samples];
-            let mut poped_data = vec![0.0f32; required_samples];
-            let poped_data_len = consumer_a.pop_slice(&mut poped_data);
+            poped_data_len = ring_data.c_a.pop_slice(&mut poped_data);
             debug_println!("poped_data_len = {:?}", poped_data_len);
 
             // convert the data to satisfy the buffer(已经是 f32,无需转换)
@@ -210,6 +233,23 @@ fn main() -> Result<(), anyhow::Error> {
             debug_println!("buffer[10](before) = {:?}", buffer[10]);
             fft.process(&mut buffer);
             debug_println!("buffer[10](after) = {:?}", buffer[10]);
+
+            // push the "buffer" to the "ring_fft_ui"
+            for _ in 0..(RING_CAPACITY_FFT_UI / 2) {
+                ring_data
+                    .p_b
+                    .try_push(Complex::<f32>::new(0.0f32, 0.0f32))
+                    .unwrap();
+            }
+            let pushed_slice_cnt = ring_data.p_b.push_slice(&buffer);
+            debug_println!(
+                "pushed_slice_cnt = {:?}, buffer.len() = {:?}.",
+                pushed_slice_cnt,
+                buffer.len()
+            );
+            if pushed_slice_cnt < buffer.len() {
+                log::error!("Producing fft output data too fast!!");
+            }
 
             // If have signals to end thread, then exit it
             if shutdown_worker_a.load(Ordering::Relaxed) == true {
@@ -225,8 +265,37 @@ fn main() -> Result<(), anyhow::Error> {
     let _ = execute!(stdout, EnterAlternateScreen);
     println!("Hello AlernateScreen");
 
-    // spawn the thread for "exit" monitoring
+    // spawn the thread for ui display with "crossterm"
     let shutdown_worker_b = Arc::clone(&shutdown);
+    let handle_ui = thread::spawn(move || -> Result<(), anyhow::Error> {
+        let required_samples = FFT_SIZE;
+        let mut poped_data = vec![Complex::<f32>::new(0.0f32, 0.0f32); required_samples];
+        let mut poped_data_len: usize = 0;
+        debug_println!("poped_data_len = {:?}", poped_data_len);
+
+        loop {
+            // wait for enough data to be received
+            while ring_data.c_b.occupied_len() < required_samples {
+                thread::sleep(Duration::from_millis(1));
+            }
+
+            // vars about poped data
+            poped_data_len = ring_data.c_b.pop_slice(&mut poped_data);
+            debug_println!("poped_data_len = {:?}", poped_data_len);
+
+            // draw the ui using the "crossterm"
+            display_fft_buffer(&poped_data, input_config.into());
+
+            // if have signals to end thread, then exit it
+            if shutdown_worker_b.load(Ordering::Relaxed) == true {
+                break;
+            }
+        }
+        Ok(())
+    });
+
+    // spawn the thread for "exit" monitoring
+    let shutdown_worker_c = Arc::clone(&shutdown);
     let handle_keyscan = thread::spawn(move || -> Result<(), anyhow::Error> {
         loop {
             // exit the AlternateScreen when press 'q'
@@ -240,7 +309,7 @@ fn main() -> Result<(), anyhow::Error> {
         }
         // Crossterm: exit the alternate screen
         // And change atomicbool for other threads
-        shutdown_worker_b.store(true, Ordering::Relaxed);
+        shutdown_worker_c.store(true, Ordering::Relaxed);
         let _ = execute!(stdout, LeaveAlternateScreen)?;
         disable_raw_mode()?;
         Ok(())
@@ -255,6 +324,7 @@ fn main() -> Result<(), anyhow::Error> {
     drop(stream);
     let _ = handle_fft.join().unwrap();
     let _ = handle_keyscan.join().unwrap();
+    let _ = handle_ui.join().unwrap();
 
     Ok(())
 }
