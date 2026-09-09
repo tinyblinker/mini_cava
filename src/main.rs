@@ -248,11 +248,6 @@ fn fft_worker(
         p_b.try_push(Complex::<f32>::new(0.0f32, 0.0f32)).unwrap();
     }
     loop {
-        // If have signals to end thread, then exit it
-        if shutdown_worker.load(Ordering::Relaxed) == true {
-            break;
-        }
-
         // Data is consumed too fast!!! should be wait here
         while c_a.occupied_len() < required_samples {
             // If have signals to end thread, then exit it
@@ -260,6 +255,11 @@ fn fft_worker(
                 break;
             }
             thread::sleep(Duration::from_millis(1));
+        }
+
+        // If have signals to end thread, then exit it
+        if shutdown_worker.load(Ordering::Relaxed) == true {
+            break;
         }
 
         // use poped data to fill the buffer
@@ -290,11 +290,6 @@ fn ui_worker(
     let required_samples = FFT_SIZE;
     let mut poped_data = vec![Complex::<f32>::new(0.0f32, 0.0f32); required_samples];
     loop {
-        // if have signals to end thread, then exit it
-        if shutdown_worker.load(Ordering::Relaxed) == true {
-            break;
-        }
-
         // wait for enough data to be received
         while c_b.occupied_len() < required_samples {
             // if have signals to end thread, then exit it
@@ -302,6 +297,11 @@ fn ui_worker(
                 break;
             }
             thread::sleep(Duration::from_millis(1));
+        }
+
+        // if have signals to end thread, then exit it
+        if shutdown_worker.load(Ordering::Relaxed) == true {
+            break;
         }
 
         // pop data
