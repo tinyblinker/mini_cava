@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::anyhow;
+use apodize::hanning_iter;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Device, Error, ErrorKind, FromSample, InputCallbackInfo, SampleFormat, SizedSample, Stream,
@@ -63,16 +64,11 @@ fn err_fn(err: Error) {
     }
 }
 
-fn display_fft_buffer(buffer: &Vec<Complex<f32>>, config: StreamConfig) -> () {
-    // fft_data(transferred to Vec<f32>)
-    let fft_data: Vec<f32> = buffer
-        .iter()
-        .map(|fft_complex| fft_complex.norm())
-        .collect();
-
+fn display_fft_buffer(normed_data_half: &[f32], config: StreamConfig) -> () {
     // 定义Vec<f32>(长度FFT_SIZE)中每一个数字是一个bin(视为cava显示中的一根柱子)
     // 每两个bin之间相隔的频率等于sample_rate / FFT_SIZE
     let freq_atom: f32 = config.sample_rate as f32 / FFT_SIZE as f32;
+    //    debug_println!("freq_atom = {:?}", freq_atom);
 }
 
 fn run<T>(
@@ -185,7 +181,7 @@ fn make_stream_cpal(
         // SampleFormat::U16 => run::<u16>(&input_device, input_config.into()),
         // SampleFormat::U32 => run::<u32>(&input_device, input_config.into()),
         // SampleFormat::U64 => run::<u64>(&input_device, input_config.into()),
-        SampleFormat::F32 => run::<f32>(&input_device, (input_config).clone().into(), p_a),
+        SampleFormat::F32 => run::<f32>(&input_device, (*input_config).into(), p_a),
         // SampleFormat::F64 => run::<f64>(&input_device, input_config.into()),
         sample_format => panic!("Unsupported sample format '{sample_format}'"),
     }?;
@@ -205,31 +201,47 @@ fn end_program_through_worker(shutdown_worker: Arc<AtomicBool>) -> Result<(), an
     Ok(())
 }
 
-/// make fft buffer
-fn make_fft_buffer(
-    poped_data: &mut [f32],
-    channels: usize,
-) -> Result<Vec<Complex<f32>>, anyhow::Error> {
-    let buffer = match channels {
+/// process the hanning window
+fn process_hanning_window(
+    buffer: &mut Vec<Complex<f32>>,
+    hanning_window: &[f32],
+    samples: &mut [f32],
+    channels: &usize,
+) -> Result<(), anyhow::Error> {
+    *buffer = match *channels {
         1usize => {
-            let res = poped_data
+            let windowed = samples
                 .iter()
-                .map(|data| Complex::<f32>::new(*data, 0.0f32))
+                .zip(hanning_window.iter())
+                .map(|(buffer_data, hanning_window)| {
+                    Complex::<f32>::new(buffer_data * hanning_window, 0.0f32)
+                })
                 .collect();
-            Ok(res)
+            Ok(windowed)
         }
         2usize => {
-            let res = poped_data
-                .chunks_exact_mut(2)
-                .map(|lr| Complex::<f32>::new((lr[0] + lr[1]) / 2f32, 0.0f32))
+            let windowed = samples
+                .chunks_exact_mut(*channels)
+                .zip(hanning_window.iter())
+                .map(|(sample_data_lr, hanning_window)| {
+                    Complex::<f32>::new(
+                        (sample_data_lr[0] + sample_data_lr[1]) / ((*channels) as f32)
+                            * hanning_window,
+                        0.0f32,
+                    )
+                })
                 .collect();
-            Ok(res)
+            Ok(windowed)
         }
         _ => Err(anyhow!(
-            "unsupported channel count: {channels}, only 1 or 2 are supported"
+            "unsupported channel count: {channels}, only 1 or 2 are supported!!!!"
         )),
-    };
-    buffer
+    }?;
+    Ok(())
+}
+
+fn init_hanning_window(hanning_window: &mut Vec<f32>) -> () {
+    *hanning_window = hanning_iter(FFT_SIZE).map(|x| x as f32).collect();
 }
 
 /// RustFFT(PCM_data -> 频域数据<频谱>)
@@ -238,15 +250,18 @@ fn fft_worker(
     mut c_a: MyConsumer<f32>,
     mut p_b: MyProducer<Complex<f32>>,
     channels: usize,
+    hanning_window: &[f32],
 ) -> Result<(), anyhow::Error> {
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(FFT_SIZE);
     let required_samples = FFT_SIZE * channels;
     let mut poped_data = vec![0.0f32; required_samples];
+
     // init ringbuffer_b
     for _ in 0..(RING_CAPACITY_FFT_UI / 2) {
         p_b.try_push(Complex::<f32>::new(0.0f32, 0.0f32)).unwrap();
     }
+
     loop {
         // Data is consumed too fast!!! should be wait here
         while c_a.occupied_len() < required_samples {
@@ -264,7 +279,10 @@ fn fft_worker(
 
         // use poped data to fill the buffer
         let _ = c_a.pop_slice(&mut poped_data);
-        let mut buffer = make_fft_buffer(&mut poped_data, channels)?;
+
+        // process buffer
+        let mut buffer: Vec<Complex<f32>> = vec![];
+        process_hanning_window(&mut buffer, &hanning_window, &mut poped_data, &channels)?;
         fft.process(&mut buffer);
 
         // push the "buffer" to the "ring_fft_ui"
@@ -282,10 +300,18 @@ fn init_atomicbool() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
+fn fft_normalization(poped_data: &mut [Complex<f32>], window_sum: &f32) -> Vec<f32> {
+    poped_data[0..(poped_data.len() / 2)]
+        .iter()
+        .map(|complex_data| complex_data.norm() / window_sum)
+        .collect()
+}
+
 fn ui_worker(
     shutdown_worker: Arc<AtomicBool>,
     mut c_b: MyConsumer<Complex<f32>>,
     input_config: &SupportedStreamConfig,
+    window_sum: &f32,
 ) -> Result<(), anyhow::Error> {
     let required_samples = FFT_SIZE;
     let mut poped_data = vec![Complex::<f32>::new(0.0f32, 0.0f32); required_samples];
@@ -307,8 +333,13 @@ fn ui_worker(
         // pop data
         let _ = c_b.pop_slice(&mut poped_data);
 
+        // fft normalization
+        let normed_data_half = fft_normalization(&mut poped_data, &window_sum);
+
+        // debug_println!("normed_data_half.len() = {:?}", normed_data_half.len());
+        // debug_println!("normed_data = {:?}", normed_data_half);
         // draw the ui using the "crossterm"
-        display_fft_buffer(&poped_data, input_config.clone().into());
+        display_fft_buffer(&normed_data_half, (*input_config).into());
     }
     Ok(())
 }
@@ -353,8 +384,11 @@ fn main() -> Result<(), anyhow::Error> {
     enter_alternate_screen()?;
     let ring_data = create_ring();
     let shutdown = init_atomicbool();
+    let mut hanning_window: Vec<f32> = vec![];
+    init_hanning_window(&mut hanning_window);
+    let window_sum: f32 = hanning_window.iter().sum();
 
-    // CPAL create
+    // CPAL create (!!should keep stream alive)
     let (input_device, input_config) = init_cpal()?;
     let stream = make_stream_cpal(&input_device, &input_config, ring_data.p_a)?;
     play_stream_cpal(&stream)?;
@@ -367,13 +401,15 @@ fn main() -> Result<(), anyhow::Error> {
             ring_data.c_a,
             ring_data.p_b,
             (input_config.channels()) as usize,
+            &hanning_window,
         )
     });
 
     // spawn the thread for ui display (crossterm create)
     let shutdown_worker_b = Arc::clone(&shutdown);
-    let handle_ui =
-        thread::spawn(move || ui_worker(shutdown_worker_b, ring_data.c_b, &input_config));
+    let handle_ui = thread::spawn(move || {
+        ui_worker(shutdown_worker_b, ring_data.c_b, &input_config, &window_sum)
+    });
 
     // spawn the thread for "exit" monitoring
     let shutdown_worker_c = Arc::clone(&shutdown);

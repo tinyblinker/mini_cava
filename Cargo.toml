@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+apodize = "1.0.0"
 cpal = { version = "0.18.2", features = ["pipewire"] }
 crossterm = "0.29.0"
 log = "0.4.34"
