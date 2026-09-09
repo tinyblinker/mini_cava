@@ -198,6 +198,40 @@ fn play_stream_cpal(stream: &Stream) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// end the whole program in worker
+fn end_program_through_worker(shutdown_worker: Arc<AtomicBool>) -> Result<(), anyhow::Error> {
+    exit_alternate_screen()?;
+    shutdown_worker.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+/// make fft buffer
+fn make_fft_buffer(
+    poped_data: &mut [f32],
+    channels: usize,
+) -> Result<Vec<Complex<f32>>, anyhow::Error> {
+    let buffer = match channels {
+        1usize => {
+            let res = poped_data
+                .iter()
+                .map(|data| Complex::<f32>::new(*data, 0.0f32))
+                .collect();
+            Ok(res)
+        }
+        2usize => {
+            let res = poped_data
+                .chunks_exact_mut(2)
+                .map(|lr| Complex::<f32>::new((lr[0] + lr[1]) / 2f32, 0.0f32))
+                .collect();
+            Ok(res)
+        }
+        _ => Err(anyhow!(
+            "unsupported channel count: {channels}, only 1 or 2 are supported"
+        )),
+    };
+    buffer
+}
+
 /// RustFFT(PCM_data -> 频域数据<频谱>)
 fn fft_worker(
     shutdown_worker: Arc<AtomicBool>,
@@ -221,14 +255,10 @@ fn fft_worker(
 
         // use poped data to fill the buffer
         let _ = c_a.pop_slice(&mut poped_data);
-        let mut buffer: Vec<Complex<f32>> = poped_data
-            .chunks_exact_mut(2)
-            .map(|lr| Complex::<f32>::new((lr[0] + lr[1]) / (channels as f32), 0.0))
-            .collect();
+        let mut buffer = make_fft_buffer(&mut poped_data, channels)?;
         fft.process(&mut buffer);
 
         // push the "buffer" to the "ring_fft_ui"
-
         let pushed_slice_cnt = p_b.push_slice(&buffer);
 
         // log
@@ -295,11 +325,9 @@ fn keyscan_worker(shutdown_worker: Arc<AtomicBool>) -> Result<(), anyhow::Error>
         }
     }
 
-    // change Atomicbool for other threads
-    shutdown_worker.store(true, Ordering::Relaxed);
-
-    // exit alternate,diable raw
-    exit_alternate_screen()
+    // end the whole program
+    end_program_through_worker(shutdown_worker)?;
+    Ok(())
 }
 
 /// enter alternate,enable raw mode(能不用按Enter直接捕获键)
