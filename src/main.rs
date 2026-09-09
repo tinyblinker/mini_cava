@@ -248,8 +248,17 @@ fn fft_worker(
         p_b.try_push(Complex::<f32>::new(0.0f32, 0.0f32)).unwrap();
     }
     loop {
+        // If have signals to end thread, then exit it
+        if shutdown_worker.load(Ordering::Relaxed) == true {
+            break;
+        }
+
         // Data is consumed too fast!!! should be wait here
         while c_a.occupied_len() < required_samples {
+            // If have signals to end thread, then exit it
+            if shutdown_worker.load(Ordering::Relaxed) == true {
+                break;
+            }
             thread::sleep(Duration::from_millis(1));
         }
 
@@ -264,11 +273,6 @@ fn fft_worker(
         // log
         if pushed_slice_cnt < buffer.len() {
             log::error!("Producing fft output data too fast!!");
-        }
-
-        // If have signals to end thread, then exit it
-        if shutdown_worker.load(Ordering::Relaxed) == true {
-            break;
         }
     }
     Ok(())
@@ -286,8 +290,17 @@ fn ui_worker(
     let required_samples = FFT_SIZE;
     let mut poped_data = vec![Complex::<f32>::new(0.0f32, 0.0f32); required_samples];
     loop {
+        // if have signals to end thread, then exit it
+        if shutdown_worker.load(Ordering::Relaxed) == true {
+            break;
+        }
+
         // wait for enough data to be received
         while c_b.occupied_len() < required_samples {
+            // if have signals to end thread, then exit it
+            if shutdown_worker.load(Ordering::Relaxed) == true {
+                break;
+            }
             thread::sleep(Duration::from_millis(1));
         }
 
@@ -296,11 +309,6 @@ fn ui_worker(
 
         // draw the ui using the "crossterm"
         display_fft_buffer(&poped_data, input_config.clone().into());
-
-        // if have signals to end thread, then exit it
-        if shutdown_worker.load(Ordering::Relaxed) == true {
-            break;
-        }
     }
     Ok(())
 }
