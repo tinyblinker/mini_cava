@@ -17,9 +17,7 @@ use cpal::{
     StreamConfig, SupportedStreamConfig,
 };
 use crossterm::{
-    event::{self, Event, KeyCode},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{self, Event, KeyCode}, execute, terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use log::LevelFilter;
 use ringbuf::{
@@ -64,11 +62,23 @@ fn err_fn(err: Error) {
     }
 }
 
-fn display_fft_buffer(normed_data_half: &[f32], config: StreamConfig) -> () {
+fn display_fft_buffer(normed_data_half: &[f32], config: StreamConfig) -> Result<(), anyhow::Error> {
     // 定义Vec<f32>(长度FFT_SIZE)中每一个数字是一个bin(视为cava显示中的一根柱子)
     // 每两个bin之间相隔的频率等于sample_rate / FFT_SIZE
     let freq_atom: f32 = config.sample_rate as f32 / FFT_SIZE as f32;
     //    debug_println!("freq_atom = {:?}", freq_atom);
+
+    // import stdout
+    let mut stdout = stdout();
+    
+    // get terminal size
+    let (width, height) = terminal::size()?;
+
+    // FFT bin 压缩到终端宽度
+    let bars = width as usize;
+    let bins_per_bar = normed_data_half.len() as f32 / bars as f32;
+    
+    Ok(())
 }
 
 fn run<T>(
@@ -339,7 +349,7 @@ fn ui_worker(
         // debug_println!("normed_data_half.len() = {:?}", normed_data_half.len());
         // debug_println!("normed_data = {:?}", normed_data_half);
         // draw the ui using the "crossterm"
-        display_fft_buffer(&normed_data_half, (*input_config).into());
+        display_fft_buffer(&normed_data_half, (*input_config).into())?;
     }
     Ok(())
 }
