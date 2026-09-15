@@ -62,8 +62,8 @@ const RING_CAPACITY_FFT_UI: usize = FFT_SIZE * 40;
 const BAR_WIDTH: usize = 1;   // 每根柱子的列宽(字符)
 const BAR_SPACING: usize = 0; // 柱子之间的空隙列数
 const DB_FLOOR: f32 = -60.0;  // 动态范围下限(dB):柱高映射到 [-60, 0] dB
-const GRAVITY: f32 = 2.0;     // 幂次曲线:>1 让小声柱子相对更矮,高低差更明显
-const ATTACK: f32 = 0.5;      // 柱子上涨速度(每帧逼近目标的系数)
+const GRAVITY: f32 = 1.3;     // 幂次曲线:>1 让小声柱子相对更矮,高低差更明显
+const ATTACK: f32 = 0.9;      // 柱子上涨速度(每帧逼近目标的系数)
 const DECAY: f32 = 0.05;      // 柱子下降速度(系数,越小下降越慢)
 
 // 柱子按对数频率分布,覆盖 [LOWER_CUTOFF_FREQ, HIGHER_CUTOFF_FREQ]。
