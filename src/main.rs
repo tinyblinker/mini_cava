@@ -62,6 +62,9 @@ const RING_CAPACITY_FFT_UI: usize = FFT_SIZE * 40;
 const DB_MIN: f32 = -240.0;
 const BAR_WIDTH: usize = 3; // 每根 bar 的列宽
 const BAR_SPACING: usize = 1; // bar 之间的空隙列数
+const ATTACK: f32 = 0.3; // 柱上升速度(每帧逼近目标的系数)
+const DECAY: f32 = 0.15; // 柱下降速度
+const LOG_BASE: f32 = 4.0; // 对数频率映射的弯曲度(越大低频越密集)
 
 fn err_fn(err: Error) {
     match err.kind() {
@@ -78,20 +81,32 @@ struct SpectrumRenderer {
     height: u16,
     stream_config: StreamConfig,
     frame_buffer: Vec<char>,
+    smoothed_heights: Vec<f32>,
 }
 
 impl SpectrumRenderer {
     pub fn new(stream_config: StreamConfig) -> Result<Self, anyhow::Error> {
         let (width, height) = terminal::size()?;
         let prev_cells = vec![' '; width as usize * height as usize];
+        let bars = width as usize / (BAR_WIDTH + BAR_SPACING);
+        let smoothed_heights = vec![0.0f32; bars];
         Ok(Self {
             stdout: stdout(),
             width,
             height,
             stream_config,
             frame_buffer: prev_cells,
+            smoothed_heights,
         })
     }
+}
+
+/// 把 bar 序号 s(0..bars) 映射到 FFT bin 下标(0..len),低频段分得更多柱。
+/// 采用 (base^t - 1)/(base - 1) 的指数分布,t = s/bars。
+fn log_bin_index(s: f32, bars: f32, len: usize) -> usize {
+    let t = s / bars;
+    let norm = (LOG_BASE.powf(t) - 1.0) / (LOG_BASE - 1.0);
+    (norm * len as f32) as usize
 }
 
 /// bar=柱子数=终端宽度,bin=频点(比如fft之后的Vec<f32>中每一个数就是一个bin)       
@@ -104,25 +119,29 @@ fn display_fft_buffer(
     if bars == 0 {
         return Ok(());
     }
-    let bins_per_bar = normed_half_db_data.len() as f32 / bars as f32;
+    let len = normed_half_db_data.len();
 
-    // 每个终端列(bar)->柱高(bin display)(取该bar覆盖的bins中最大的幅值)
+    // 每根 bar 的目标高度(对数频率映射 + 归一化)
     let mut all_bars_heights = vec![0usize; bars]; // !!!此处考虑错如renderer缓存,做lazyloader
     for x in 0..bars {
-        let start_bin_index = (x as f32 * bins_per_bar) as usize;
-        let end_bin_index =
-            (((x + 1) as f32 * bins_per_bar) as usize).min(normed_half_db_data.len());
-        // 从当前bins区间找出最大的bin(!!!考虑此处改成求平均值)
+        // 对数频率:低频(bin 下标小)分到更多柱
+        let start_bin_index = log_bin_index(x as f32, bars as f32, len);
+        let end_bin_index = log_bin_index((x + 1) as f32, bars as f32, len).min(len);
+        // 从当前bins区间求平均幅值
         let avg_bin_value: f32 = normed_half_db_data[start_bin_index..end_bin_index]
             .iter()
             .sum::<f32>()
             / ((end_bin_index - start_bin_index).max(1) as f32);
-        // 归一化db数据(映射到[0.0,1.0]的区间)--->!!!!成功
+        // 归一化db数据(映射到[0.0,1.0]的区间)
         let mapped_db = (avg_bin_value + (-DB_MIN)) / (-DB_MIN);
-        // (频谱的每个bin的大小/幅值)bin的值->height(对数缩放,常数需要按照需求调整)
-        let bar_height = mapped_db * ((renderer.height - 1) as f32);
-        // debug_println!("bar_height={:?}", bar_height);
-        all_bars_heights[x] = bar_height as usize;
+        let target = mapped_db * ((renderer.height - 1) as f32);
+
+        // attack/decay 平滑:上升快、下降慢,柱高不再瞬间跳变
+        let prev = renderer.smoothed_heights[x];
+        let k = if target > prev { ATTACK } else { DECAY };
+        renderer.smoothed_heights[x] = prev + (target - prev) * k;
+
+        all_bars_heights[x] = renderer.smoothed_heights[x] as usize;
     }
 
     // 单次遍历:逐行逐格生成并 diff,只重绘与上一帧不同的单元格

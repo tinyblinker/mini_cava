@@ -1,30 +1,32 @@
 #+TITLE: cava_plus_plus
 #+AUTHOR: shyweeds
 
-基于 Rust 的类 cava 终端音频频谱可视化程序。
+A terminal audio spectrum visualizer in Rust, similar to cava.
 
-* 依赖
-- Rust（nightly / edition 2024）
-- 系统库：=pkgconf=、=pipewire=、=alsa-lib=、=clang=
-- 音频输入：PipeWire 的 =default_sink= 监听源
+* Dependencies
+- Rust (nightly / edition 2024)
+- System libraries: =pkgconf=, =pipewire=, =alsa-lib=, =clang=
+- Audio input: the =default_sink= monitor source of PipeWire
 
-安装系统依赖（Arch Linux）：
+Install system dependencies (Arch Linux):
 
 #+begin_src sh
 ./install_deps.sh
 #+end_src
 
-* 构建与运行
+* Build and Run
 #+begin_src sh
 cargo run
 #+end_src
 
-按 =q= 退出。
+Press =q= to quit.
 
-* 实现
-- =cpal= 采集音频 → =ringbuf= 环形缓冲 → =rustfft= FFT
-- =crossterm= 在 alternate screen 中按帧绘制频谱条
-- 输出使用绝对光标定位逐行绘制，不依赖换行符，避免 raw 模式下
-  =OPOST= 关闭导致的画面横向错位
-- 每根 bar 占 3 列、bar 之间空 1 列
-- 惰性渲染：只重绘与上一帧不同的单元格
+* Implementation
+- =cpal= captures audio -> =ringbuf= ring buffer -> =rustfft= FFT
+- =crossterm= draws spectrum bars frame by frame in the alternate screen
+- Output uses absolute cursor positioning, so it does not rely on newlines
+  and avoids horizontal misalignment caused by =OPOST= being off in raw mode
+- Each bar is 3 columns wide, with 1 empty column between bars
+- Lazy rendering: only cells that differ from the previous frame are redrawn
+- Attack/decay smoothing: bars rise fast and fall slowly instead of jumping
+- Logarithmic frequency mapping: low frequencies get more bars
