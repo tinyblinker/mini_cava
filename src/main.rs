@@ -50,6 +50,8 @@ const FFT_SIZE: usize = 1024;
 const RING_CAPACITY_CPAL_FFT: usize = FFT_SIZE * 40;
 const RING_CAPACITY_FFT_UI: usize = FFT_SIZE * 40;
 const DB_MIN: f32 = -240.0;
+const BAR_WIDTH: usize = 3; // 每根 bar 的列宽
+const BAR_SPACING: usize = 1; // bar 之间的空隙列数
 
 fn err_fn(err: Error) {
     match err.kind() {
@@ -65,19 +67,19 @@ struct SpectrumRenderer {
     width: u16,
     height: u16,
     stream_config: StreamConfig,
-    frame_buffer: String,
+    frame_buffer: Vec<char>,
 }
 
 impl SpectrumRenderer {
     pub fn new(stream_config: StreamConfig) -> Result<Self, anyhow::Error> {
         let (width, height) = terminal::size()?;
-        let frame_buffer = String::with_capacity((width as usize + 1) * (height as usize + 1));
+        let prev_cells = vec![' '; width as usize * height as usize];
         Ok(Self {
             stdout: stdout(),
             width,
             height,
             stream_config,
-            frame_buffer,
+            frame_buffer: prev_cells,
         })
     }
 }
@@ -88,7 +90,10 @@ fn display_fft_buffer(
     spectrum_renderer: &mut SpectrumRenderer,
 ) -> Result<(), anyhow::Error> {
     let renderer = spectrum_renderer;
-    let bars = renderer.width as usize;
+    let bars = renderer.width as usize / (BAR_WIDTH + BAR_SPACING);
+    if bars == 0 {
+        return Ok(());
+    }
     let bins_per_bar = normed_half_db_data.len() as f32 / bars as f32;
 
     // 每个终端列(bar)->柱高(bin display)(取该bar覆盖的bins中最大的幅值)
@@ -109,33 +114,50 @@ fn display_fft_buffer(
         all_bars_heights[x] = bar_height as usize;
     }
 
-    // 从顶部到底部逐行生成画面:col行row列,有height行
-    for col_index in (0..renderer.height.saturating_sub(1)).rev() {
+    // 单次遍历:逐行逐格生成并 diff,只重绘与上一帧不同的单元格
+    // lazy_render!!!
+    let width = renderer.width as usize;
+    for row in 0..renderer.height {
+        // 该行距底部的距离:底部为 0,顶部为 height-1
+        let distance_from_bottom = renderer.height - 1 - row;
+        let mut col = 0usize;
         for &bar_height in &all_bars_heights {
-            renderer
-                .frame_buffer
-                .push(if bar_height > (col_index as usize) {
-                    'O'
-                } else {
-                    ' '
-                });
+            let ch = if bar_height > distance_from_bottom as usize {
+                '█'
+            } else {
+                ' '
+            };
+            for _ in 0..BAR_WIDTH {
+                let idx = row as usize * width + col;
+                if renderer.frame_buffer[idx] != ch {
+                    queue!(
+                        renderer.stdout,
+                        cursor::MoveTo(col as u16, row),
+                        style::Print(ch)
+                    )?;
+                    renderer.frame_buffer[idx] = ch;
+                }
+                col += 1;
+            }
+            for _ in 0..BAR_SPACING {
+                let idx = row as usize * width + col;
+                if renderer.frame_buffer[idx] != ' ' {
+                    queue!(
+                        renderer.stdout,
+                        cursor::MoveTo(col as u16, row),
+                        style::Print(' ')
+                    )?;
+                    renderer.frame_buffer[idx] = ' ';
+                }
+                col += 1;
+            }
         }
-        renderer.frame_buffer.push('\n');
     }
 
-    // 显示输出(!!!!考虑改成只打印变化的图形帧):queue!不是有输出立刻刷屏,而是攒着等flush刷屏
-    queue!(
-        renderer.stdout,
-        cursor::MoveTo(0, 0),
-        style::Print(&renderer.frame_buffer)
-    )?;
-
-    // 把stdout立刻输出
+    // 把本帧的 diff 一次性输出
     renderer.stdout.flush()?;
-    
-    // 清空framebuffer,方便下次重新打印
-    renderer.frame_buffer.clear();
-    
+
+    thread::sleep(Duration::from_millis(16));
     Ok(())
 }
 
@@ -420,6 +442,7 @@ fn ui_worker(
 /// exit alternateScreen, disable raw mode
 fn exit_alternate_screen() -> Result<(), anyhow::Error> {
     let mut stdout = stdout();
+    let _ = execute!(stdout, cursor::Show);
     disable_raw_mode()?;
     let _ = execute!(stdout, LeaveAlternateScreen);
     Ok(())
@@ -446,8 +469,7 @@ fn keyscan_worker(shutdown_worker: Arc<AtomicBool>) -> Result<(), anyhow::Error>
 fn enter_alternate_screen() -> Result<(), anyhow::Error> {
     let mut stdout = stdout();
     enable_raw_mode()?;
-    let _ = execute!(stdout, EnterAlternateScreen);
-    println!("Hello AlernateScreen");
+    let _ = execute!(stdout, EnterAlternateScreen, cursor::Hide);
     Ok(())
 }
 
