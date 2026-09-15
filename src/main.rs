@@ -64,7 +64,7 @@ const BAR_WIDTH: usize = 3; // 每根 bar 的列宽
 const BAR_SPACING: usize = 1; // bar 之间的空隙列数
 const ATTACK: f32 = 0.3; // 柱上升速度(每帧逼近目标的系数)
 const DECAY: f32 = 0.15; // 柱下降速度
-const LOG_BASE: f32 = 4.0; // 对数频率映射的弯曲度(越大低频越密集)
+const LOG_BASE: f32 = 0.1; // 对数频率映射的弯曲度(越大低频越密集)
 
 fn err_fn(err: Error) {
     match err.kind() {
@@ -99,6 +99,20 @@ impl SpectrumRenderer {
             smoothed_heights,
         })
     }
+
+    /// diff + 移动光标 + 打印 + 更新缓存:只重绘与上一帧不同的单元格
+    fn draw_cell(&mut self, col: usize, row: u16, ch: char) -> Result<(), anyhow::Error> {
+        let idx = row as usize * self.width as usize + col;
+        if self.frame_buffer[idx] != ch {
+            queue!(
+                self.stdout,
+                cursor::MoveTo(col as u16, row),
+                style::Print(ch)
+            )?;
+            self.frame_buffer[idx] = ch;
+        }
+        Ok(())
+    }
 }
 
 /// 把 bar 序号 s(0..bars) 映射到 FFT bin 下标(0..len),低频段分得更多柱。
@@ -107,6 +121,36 @@ fn log_bin_index(s: f32, bars: f32, len: usize) -> usize {
     let t = s / bars;
     let norm = (LOG_BASE.powf(t) - 1.0) / (LOG_BASE - 1.0);
     (norm * len as f32) as usize
+}
+
+/// 8 级填充字符:0 = 空格,1..=8 对应「下 1/8 块」到「全满块」。
+fn block_char(level: usize) -> char {
+    const LOWER_BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if level == 0 {
+        ' '
+    } else {
+        LOWER_BLOCKS[level - 1]
+    }
+}
+
+/// 计算第 x 根柱平滑后的高度(单位:1/8 格)。
+/// 包含对数频率映射、区间平均、归一化、attack/decay 平滑。
+fn compute_bar_height(
+    x: usize,
+    bars: usize,
+    normed_half_db_data: &[f32],
+    max_height: f32,
+    smoothed: &mut f32,
+) -> usize {
+    let len = normed_half_db_data.len();
+    let start = log_bin_index(x as f32, bars as f32, len);
+    let end = log_bin_index((x + 1) as f32, bars as f32, len).min(len);
+    let avg = normed_half_db_data[start..end].iter().sum::<f32>() / (end - start).max(1) as f32;
+    let mapped = (avg + (-DB_MIN)) / (-DB_MIN);
+    let target = mapped * max_height;
+    let k = if target > *smoothed { ATTACK } else { DECAY };
+    *smoothed += (target - *smoothed) * k;
+    (*smoothed * 8.0) as usize
 }
 
 /// bar=柱子数=终端宽度,bin=频点(比如fft之后的Vec<f32>中每一个数就是一个bin)       
@@ -119,67 +163,30 @@ fn display_fft_buffer(
     if bars == 0 {
         return Ok(());
     }
-    let len = normed_half_db_data.len();
+    let max_height = (renderer.height - 1) as f32;
 
-    // 每根 bar 的目标高度(对数频率映射 + 归一化)
-    let mut all_bars_heights = vec![0usize; bars]; // !!!此处考虑错如renderer缓存,做lazyloader
+    // 单次遍历:按柱逐根计算高度并绘制整列(bar 列 + 分隔列)
     for x in 0..bars {
-        // 对数频率:低频(bin 下标小)分到更多柱
-        let start_bin_index = log_bin_index(x as f32, bars as f32, len);
-        let end_bin_index = log_bin_index((x + 1) as f32, bars as f32, len).min(len);
-        // 从当前bins区间求平均幅值
-        let avg_bin_value: f32 = normed_half_db_data[start_bin_index..end_bin_index]
-            .iter()
-            .sum::<f32>()
-            / ((end_bin_index - start_bin_index).max(1) as f32);
-        // 归一化db数据(映射到[0.0,1.0]的区间)
-        let mapped_db = (avg_bin_value + (-DB_MIN)) / (-DB_MIN);
-        let target = mapped_db * ((renderer.height - 1) as f32);
+        let bar_height = compute_bar_height(
+            x,
+            bars,
+            normed_half_db_data,
+            max_height,
+            &mut renderer.smoothed_heights[x],
+        );
+        let base_col = x * (BAR_WIDTH + BAR_SPACING);
 
-        // attack/decay 平滑:上升快、下降慢,柱高不再瞬间跳变
-        let prev = renderer.smoothed_heights[x];
-        let k = if target > prev { ATTACK } else { DECAY };
-        renderer.smoothed_heights[x] = prev + (target - prev) * k;
-
-        all_bars_heights[x] = renderer.smoothed_heights[x] as usize;
-    }
-
-    // 单次遍历:逐行逐格生成并 diff,只重绘与上一帧不同的单元格
-    // lazy_render!!!
-    let width = renderer.width as usize;
-    for row in 0..renderer.height {
-        // 该行距底部的距离:底部为 0,顶部为 height-1
-        let distance_from_bottom = renderer.height - 1 - row;
-        let mut col = 0usize;
-        for &bar_height in &all_bars_heights {
-            let ch = if bar_height > distance_from_bottom as usize {
-                '█'
-            } else {
-                ' '
-            };
-            for _ in 0..BAR_WIDTH {
-                let idx = row as usize * width + col;
-                if renderer.frame_buffer[idx] != ch {
-                    queue!(
-                        renderer.stdout,
-                        cursor::MoveTo(col as u16, row),
-                        style::Print(ch)
-                    )?;
-                    renderer.frame_buffer[idx] = ch;
-                }
-                col += 1;
+        for row in 0..renderer.height {
+            // 该行距底部的距离:底部为 0,顶部为 height-1
+            let distance_from_bottom = (renderer.height - 1 - row) as usize;
+            // 本行被柱覆盖的八分级数:0=空,8=满
+            let filled = bar_height.saturating_sub(distance_from_bottom * 8).min(8);
+            let ch = block_char(filled);
+            for offset in 0..BAR_WIDTH {
+                renderer.draw_cell(base_col + offset, row, ch)?;
             }
-            for _ in 0..BAR_SPACING {
-                let idx = row as usize * width + col;
-                if renderer.frame_buffer[idx] != ' ' {
-                    queue!(
-                        renderer.stdout,
-                        cursor::MoveTo(col as u16, row),
-                        style::Print(' ')
-                    )?;
-                    renderer.frame_buffer[idx] = ' ';
-                }
-                col += 1;
+            for offset in 0..BAR_SPACING {
+                renderer.draw_cell(base_col + BAR_WIDTH + offset, row, ' ')?;
             }
         }
     }
@@ -187,7 +194,6 @@ fn display_fft_buffer(
     // 把本帧的 diff 一次性输出
     renderer.stdout.flush()?;
 
-    thread::sleep(Duration::from_millis(16));
     Ok(())
 }
 
@@ -461,7 +467,7 @@ fn ui_worker(
         // fft normalization
         let normed_half_db_data = fft_normalization(&mut poped_data, &window_sum);
 
-        // debug_println!("normed_data_half.len() = {:?}", normed_data_half.len());
+        debug_println!("normed_half_db_data = {:?}", normed_half_db_data);
         // debug_println!("normed_data = {:?}", normed_half_db_data);
         // draw the ui using the "crossterm"
         display_fft_buffer(&normed_half_db_data, &mut spectrum_renderer)?;
