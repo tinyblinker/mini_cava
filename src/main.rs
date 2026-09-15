@@ -1,7 +1,6 @@
 use std::{
     fs::File,
     io::{stdout, Stdout, Write},
-    path::MAIN_SEPARATOR,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -21,7 +20,7 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode},
     execute, queue,
-    style::{self, style},
+    style::{Color, Print, SetForegroundColor},
     terminal::{
         self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
     },
@@ -59,12 +58,29 @@ type MyConsumer<T> =
 const FFT_SIZE: usize = 1024;
 const RING_CAPACITY_CPAL_FFT: usize = FFT_SIZE * 40;
 const RING_CAPACITY_FFT_UI: usize = FFT_SIZE * 40;
-const DB_MIN: f32 = -240.0;
-const BAR_WIDTH: usize = 3; // 每根 bar 的列宽
-const BAR_SPACING: usize = 1; // bar 之间的空隙列数
-const ATTACK: f32 = 0.3; // 柱上升速度(每帧逼近目标的系数)
-const DECAY: f32 = 0.15; // 柱下降速度
-const LOG_BASE: f32 = 0.1; // 对数频率映射的弯曲度(越大低频越密集)
+// —— 频谱显示参数 ——
+const BAR_WIDTH: usize = 1;   // 每根柱子的列宽(字符)
+const BAR_SPACING: usize = 0; // 柱子之间的空隙列数
+const DB_FLOOR: f32 = -60.0;  // 动态范围下限(dB):柱高映射到 [-60, 0] dB
+const GRAVITY: f32 = 2.0;     // 幂次曲线:>1 让小声柱子相对更矮,高低差更明显
+const ATTACK: f32 = 0.5;      // 柱子上涨速度(每帧逼近目标的系数)
+const DECAY: f32 = 0.05;      // 柱子下降速度(系数,越小下降越慢)
+
+// 柱子按对数频率分布,覆盖 [LOWER_CUTOFF_FREQ, HIGHER_CUTOFF_FREQ]。
+// 上限取 ~10kHz 即可:10k~24k(奈奎斯特)段基本无内容,别把柱子浪费在超声波上。
+const LOWER_CUTOFF_FREQ: f32 = 40.0;
+const HIGHER_CUTOFF_FREQ: f32 = 10000.0;
+
+// autosens:自动增益,让最高的柱子每帧刚好顶到屏幕顶端
+const AUTOSENS_RISE: f32 = 0.05;   // 增益上升速度(慢,让柱子慢慢"涨回来")
+const SENSITIVITY_MAX: f32 = 50.0; // 增益上限,防止静音时增益爆炸
+
+// 柱顶"坠格":落在柱子上方的全字符块,下落速度比柱子慢
+const CAP_SIZE: usize = 0;     // 坠格数量
+const CAP_GRAVITY: f32 = 0.1; // 坠格每帧下落高度(单位:格)
+
+// 垂直渐变色标(底部 -> 顶部):绿 -> 黄 -> 红
+const GRADIENT: [(u8, u8, u8); 3] = [(0, 255, 0), (255, 255, 0), (255, 0, 0)];
 
 fn err_fn(err: Error) {
     match err.kind() {
@@ -75,52 +91,78 @@ fn err_fn(err: Error) {
     }
 }
 
+/// 终端一格的内容:字符 + 前景色(用于 diff 渲染,只重绘变化过的格子)。
+#[derive(Clone, Copy, PartialEq)]
+struct Cell {
+    ch: char,
+    color: Color,
+}
+
+/// 根据高度比例 t(0=底部,1=顶部)取垂直渐变颜色:绿 -> 黄 -> 红。
+fn gradient_color(t: f32) -> Color {
+    let scaled = t.clamp(0.0, 1.0) * (GRADIENT.len() - 1) as f32;
+    let i = (scaled as usize).min(GRADIENT.len() - 2);
+    let frac = scaled - i as f32;
+    let (a, b) = (GRADIENT[i], GRADIENT[i + 1]);
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * frac) as u8;
+    Color::Rgb { r: mix(a.0, b.0), g: mix(a.1, b.1), b: mix(a.2, b.2) }
+}
+
 struct SpectrumRenderer {
     stdout: Stdout,
     width: u16,
     height: u16,
-    stream_config: StreamConfig,
-    frame_buffer: Vec<char>,
-    smoothed_heights: Vec<f32>,
+    freq_atom: f32,             // 每个 FFT bin 代表的频率(Hz) = sample_rate / FFT_SIZE
+    frame_buffer: Vec<Cell>,    // 上一帧画面,用于 diff 渲染
+    smoothed_heights: Vec<f32>, // 每根柱平滑后的高度(单位:格)
+    cap_heights: Vec<f32>,      // 每根柱顶坠格(底部)的高度(单位:格)
+    bar_values: Vec<f32>,       // 本帧每根柱的原始强度(0..1),供 autosens 用
+    sensitivity: f32,           // autosens 自动增益(缓变)
 }
 
 impl SpectrumRenderer {
     pub fn new(stream_config: StreamConfig) -> Result<Self, anyhow::Error> {
         let (width, height) = terminal::size()?;
-        let prev_cells = vec![' '; width as usize * height as usize];
+        let cells = vec![Cell { ch: ' ', color: Color::Reset }; width as usize * height as usize];
         let bars = width as usize / (BAR_WIDTH + BAR_SPACING);
-        let smoothed_heights = vec![0.0f32; bars];
+        let freq_atom = stream_config.sample_rate as f32 / FFT_SIZE as f32;
         Ok(Self {
             stdout: stdout(),
             width,
             height,
-            stream_config,
-            frame_buffer: prev_cells,
-            smoothed_heights,
+            freq_atom,
+            frame_buffer: cells,
+            smoothed_heights: vec![0.0; bars],
+            cap_heights: vec![0.0; bars],
+            bar_values: vec![0.0; bars],
+            sensitivity: 1.0,
         })
     }
 
-    /// diff + 移动光标 + 打印 + 更新缓存:只重绘与上一帧不同的单元格
-    fn draw_cell(&mut self, col: usize, row: u16, ch: char) -> Result<(), anyhow::Error> {
+    /// 只重绘与上一帧不同的格子:移动光标 -> 设前景色 -> 打印字符 -> 更新缓存。
+    fn draw_cell(&mut self, col: usize, row: u16, ch: char, color: Color) -> Result<(), anyhow::Error> {
         let idx = row as usize * self.width as usize + col;
-        if self.frame_buffer[idx] != ch {
+        let cell = &mut self.frame_buffer[idx];
+        if cell.ch != ch || cell.color != color {
             queue!(
                 self.stdout,
                 cursor::MoveTo(col as u16, row),
-                style::Print(ch)
+                SetForegroundColor(color),
+                Print(ch)
             )?;
-            self.frame_buffer[idx] = ch;
+            *cell = Cell { ch, color };
         }
         Ok(())
     }
 }
 
-/// 把 bar 序号 s(0..bars) 映射到 FFT bin 下标(0..len),低频段分得更多柱。
-/// 采用 (base^t - 1)/(base - 1) 的指数分布,t = s/bars。
-fn log_bin_index(s: f32, bars: f32, len: usize) -> usize {
-    let t = s / bars;
-    let norm = (LOG_BASE.powf(t) - 1.0) / (LOG_BASE - 1.0);
-    (norm * len as f32) as usize
+/// 第 s 根柱(共 bars 根)对应的 FFT bin 下标。
+/// 柱子按对数频率分布,覆盖 [LOWER_CUTOFF_FREQ, HIGHER_CUTOFF_FREQ]。
+/// freq_atom = 每个 bin 代表的频率(Hz)。
+fn bar_to_bin(s: usize, bars: usize, freq_atom: f32) -> usize {
+    let t = s as f32 / bars as f32;
+    let freq = LOWER_CUTOFF_FREQ * (HIGHER_CUTOFF_FREQ / LOWER_CUTOFF_FREQ).powf(t);
+    (freq / freq_atom) as usize
 }
 
 /// 8 级填充字符:0 = 空格,1..=8 对应「下 1/8 块」到「全满块」。
@@ -133,67 +175,102 @@ fn block_char(level: usize) -> char {
     }
 }
 
-/// 计算第 x 根柱平滑后的高度(单位:1/8 格)。
-/// 包含对数频率映射、区间平均、归一化、attack/decay 平滑。
-fn compute_bar_height(
-    x: usize,
-    bars: usize,
-    normed_half_db_data: &[f32],
-    max_height: f32,
-    smoothed: &mut f32,
-) -> usize {
+/// 第 x 根柱子的原始强度(0..1),不含平滑。
+/// 频率映射 -> 区间取最大 -> dB 映射 -> gravity 幂次。
+fn compute_bar_value(x: usize, bars: usize, normed_half_db_data: &[f32], freq_atom: f32) -> f32 {
     let len = normed_half_db_data.len();
-    let start = log_bin_index(x as f32, bars as f32, len);
-    let end = log_bin_index((x + 1) as f32, bars as f32, len).min(len);
-    let avg = normed_half_db_data[start..end].iter().sum::<f32>() / (end - start).max(1) as f32;
-    let mapped = (avg + (-DB_MIN)) / (-DB_MIN);
-    let target = mapped * max_height;
-    let k = if target > *smoothed { ATTACK } else { DECAY };
-    *smoothed += (target - *smoothed) * k;
-    (*smoothed * 8.0) as usize
+    let start = bar_to_bin(x, bars, freq_atom);
+    let end = bar_to_bin(x + 1, bars, freq_atom).max(start + 1).min(len);
+    // 取区间最大幅值(比平均更 punchy,尖峰不被稀释)
+    let peak = normed_half_db_data[start..end]
+        .iter()
+        .cloned()
+        .fold(f32::MIN, f32::max);
+    // dB 映射 + gravity 幂次
+    ((peak - DB_FLOOR) / (-DB_FLOOR))
+        .clamp(0.0, 1.0)
+        .powf(GRAVITY)
 }
 
-/// bar=柱子数=终端宽度,bin=频点(比如fft之后的Vec<f32>中每一个数就是一个bin)       
+/// 用 crossterm 绘制频谱条。
+/// 流程:原始强度 -> autosens 归一化 -> attack/decay 平滑 -> 柱高 + 坠格 -> 渐变着色。
 fn display_fft_buffer(
     normed_half_db_data: &[f32],
-    spectrum_renderer: &mut SpectrumRenderer,
+    renderer: &mut SpectrumRenderer,
 ) -> Result<(), anyhow::Error> {
-    let renderer = spectrum_renderer;
     let bars = renderer.width as usize / (BAR_WIDTH + BAR_SPACING);
     if bars == 0 {
         return Ok(());
     }
     let max_height = (renderer.height - 1) as f32;
 
-    // 单次遍历:按柱逐根计算高度并绘制整列(bar 列 + 分隔列)
+    // 第一遍:算每根柱子的原始强度,并找出本帧最大值(供 autosens)
+    let mut frame_max = 0.0f32;
     for x in 0..bars {
-        let bar_height = compute_bar_height(
-            x,
-            bars,
-            normed_half_db_data,
-            max_height,
-            &mut renderer.smoothed_heights[x],
-        );
-        let base_col = x * (BAR_WIDTH + BAR_SPACING);
+        let v = compute_bar_value(x, bars, normed_half_db_data, renderer.freq_atom);
+        renderer.bar_values[x] = v;
+        frame_max = frame_max.max(v);
+    }
+    // autosens 更新增益:峰值超了就快降,不足就慢升
+    let target_sens = if frame_max > 1e-6 {
+        (1.0 / frame_max).min(SENSITIVITY_MAX)
+    } else {
+        renderer.sensitivity // 静音时保持不变
+    };
+    renderer.sensitivity = if target_sens < renderer.sensitivity {
+        target_sens
+    } else {
+        renderer.sensitivity + (target_sens - renderer.sensitivity) * AUTOSENS_RISE
+    };
 
+    // 第二遍:平滑 + 更新坠格 + 逐格绘制
+    for x in 0..bars {
+        // 1) 柱子高度:attack/decay 平滑
+        let target = renderer.bar_values[x] * renderer.sensitivity * max_height;
+        let sm = &mut renderer.smoothed_heights[x];
+        let k = if target > *sm { ATTACK } else { DECAY };
+        *sm += (target - *sm) * k;
+        let bar_height = *sm; // 单位:格
+
+        // 2) 坠格:柱子涨就跟上去,柱子跌就比它更慢地下落
+        let cap = &mut renderer.cap_heights[x];
+        *cap = if bar_height > *cap {
+            bar_height
+        } else {
+            (*cap - CAP_GRAVITY).max(bar_height)
+        };
+        let cap_bottom = *cap as usize; // 坠格底部所在行(距底部)
+
+        // 3) 绘制本柱这一列(bar 列 + 分隔列)
+        let base_col = x * (BAR_WIDTH + BAR_SPACING);
         for row in 0..renderer.height {
-            // 该行距底部的距离:底部为 0,顶部为 height-1
-            let distance_from_bottom = (renderer.height - 1 - row) as usize;
-            // 本行被柱覆盖的八分级数:0=空,8=满
-            let filled = bar_height.saturating_sub(distance_from_bottom * 8).min(8);
-            let ch = block_char(filled);
+            let dist = (renderer.height - 1 - row) as usize; // 距底部的行数
+            // 该行属于坠格吗?(坠格是柱顶上方 CAP_SIZE 个满块)
+            let in_cap = cap_bottom > 0 && dist >= cap_bottom && dist < cap_bottom + CAP_SIZE;
+            // 柱子在该行的 1/8 填充(坠格行由满块覆盖)
+            let filled = (bar_height * 8.0) as usize;
+            let filled = filled.saturating_sub(dist * 8).min(8);
+
+            let ch = if in_cap { '█' } else { block_char(filled) };
+            let color = if ch == ' ' {
+                Color::Reset
+            } else {
+                // 渐变按"这根柱子自身"的高度归一化:柱底绿、柱顶红,
+                // 柱高每帧变化时整段渐变随之伸缩(坠格高于柱顶,恒为顶部色)。
+                gradient_color(dist as f32 / bar_height.max(f32::EPSILON))
+            };
+
             for offset in 0..BAR_WIDTH {
-                renderer.draw_cell(base_col + offset, row, ch)?;
+                renderer.draw_cell(base_col + offset, row, ch, color)?;
             }
             for offset in 0..BAR_SPACING {
-                renderer.draw_cell(base_col + BAR_WIDTH + offset, row, ' ')?;
+                renderer.draw_cell(base_col + BAR_WIDTH + offset, row, ' ', Color::Reset)?;
             }
         }
     }
 
-    // 把本帧的 diff 一次性输出
+    // 把本帧 diff 一次性刷出
     renderer.stdout.flush()?;
-
     Ok(())
 }
 

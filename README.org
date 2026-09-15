@@ -22,11 +22,50 @@ cargo run
 Press =q= to quit.
 
 * Implementation
-- =cpal= captures audio -> =ringbuf= ring buffer -> =rustfft= FFT
-- =crossterm= draws spectrum bars frame by frame in the alternate screen
-- Output uses absolute cursor positioning, so it does not rely on newlines
-  and avoids horizontal misalignment caused by =OPOST= being off in raw mode
+** Audio pipeline
+- =cpal= captures audio from the PipeWire =default_sink= monitor
+  -> =ringbuf= ring buffer -> =rustfft= FFT
+- FFT window size is 1024, with a Hanning window applied; stereo is downmixed
+  to mono (= (L+R)/2 =)
+- Magnitudes are converted to dB: =20 * log10(norm / window_sum)=
+
+** Rendering (=crossterm=)
+- Draws spectrum bars frame by frame in the alternate screen (press =q= to quit)
+- Absolute cursor positioning (no reliance on newlines; avoids misalignment
+  when =OPOST= is off in raw mode)
 - Each bar is 3 columns wide, with 1 empty column between bars
-- Lazy rendering: only cells that differ from the previous frame are redrawn
+- Lazy rendering: only cells whose char/color differ from the previous frame
+  are redrawn
+
+** Bar height calculation
+- Log-frequency mapping covering ~=40 Hz= to =10 kHz= (cava-style), so bars
+  represent audible musical content instead of the empty ultrasonic range
+- Per-bar value = max magnitude over its frequency range, then mapped:
+  dB -> [0,1] (=DB_FLOOR=-60 dB floor) -> gravity power curve
+- Autosens: a slowly-adapting gain normalizes so the tallest bar peaks at the top
 - Attack/decay smoothing: bars rise fast and fall slowly instead of jumping
-- Logarithmic frequency mapping: low frequencies get more bars
+
+** Peak cap and color
+- Each bar carries 2 full-block "cap" cells on top; they ride up with the bar
+  but fall more slowly, leaving a floating peak behind
+- Per-bar vertical gradient (green -> yellow -> red), normalized to each bar's
+  own smoothed height so every bar runs the full gradient regardless of size
+
+* Tuning
+Key constants in =src/main.rs=:
+
+| Constant             | Default               | Meaning                          |
+|----------------------+-----------------------+----------------------------------|
+| =FFT_SIZE=           | 1024                  | FFT window size                  |
+| =DB_FLOOR=           | -60.0                 | dB floor for the height mapping  |
+| =GRAVITY=            | 1.5                   | power curve (>1 droops quiet bars) |
+| =ATTACK= / =DECAY=   | 0.4 / 0.05            | bar rise / fall speed            |
+| =LOWER_CUTOFF_FREQ=  | 40.0                  | lowest bar frequency (Hz)        |
+| =HIGHER_CUTOFF_FREQ= | 10000.0               | highest bar frequency (Hz)       |
+| =AUTOSENS_RISE=      | 0.05                  | autosens gain rise speed         |
+| =SENSITIVITY_MAX=    | 50.0                  | autosens gain cap                |
+| =CAP_SIZE=           | 2                     | number of falling peak cells     |
+| =CAP_GRAVITY=        | 0.15                  | peak-cell fall speed (cells/frame) |
+| =BAR_WIDTH=          | 3                     | bar width in columns             |
+| =BAR_SPACING=        | 1                     | gap between bars in columns      |
+| =GRADIENT=           | green -> yellow -> red | vertical color stops           |
