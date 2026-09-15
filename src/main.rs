@@ -1,7 +1,13 @@
 use std::{
-    fs::File, io::{Stdout, Write, stdout}, path::MAIN_SEPARATOR, sync::{
-        Arc, atomic::{AtomicBool, Ordering},
-    }, thread, time::Duration,
+    fs::File,
+    io::{stdout, Stdout, Write},
+    path::MAIN_SEPARATOR,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
 };
 
 use anyhow::anyhow;
@@ -12,8 +18,12 @@ use cpal::{
     StreamConfig, SupportedStreamConfig,
 };
 use crossterm::{
-    cursor, event::{self, Event, KeyCode}, execute, queue, style::{self, style}, terminal::{
-        self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    cursor,
+    event::{self, Event, KeyCode},
+    execute, queue,
+    style::{self, style},
+    terminal::{
+        self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
     },
 };
 use log::LevelFilter;
@@ -103,11 +113,12 @@ fn display_fft_buffer(
         let end_bin_index =
             (((x + 1) as f32 * bins_per_bar) as usize).min(normed_half_db_data.len());
         // 从当前bins区间找出最大的bin(!!!考虑此处改成求平均值)
-        let max_bin_value = normed_half_db_data[start_bin_index..end_bin_index]
+        let avg_bin_value: f32 = normed_half_db_data[start_bin_index..end_bin_index]
             .iter()
-            .fold(DB_MIN, |acc, &x| f32::max(acc, x));
+            .sum::<f32>()
+            / ((end_bin_index - start_bin_index).max(1) as f32);
         // 归一化db数据(映射到[0.0,1.0]的区间)--->!!!!成功
-        let mapped_db = (max_bin_value + (-DB_MIN)) / (-DB_MIN);
+        let mapped_db = (avg_bin_value + (-DB_MIN)) / (-DB_MIN);
         // (频谱的每个bin的大小/幅值)bin的值->height(对数缩放,常数需要按照需求调整)
         let bar_height = mapped_db * ((renderer.height - 1) as f32);
         // debug_println!("bar_height={:?}", bar_height);
