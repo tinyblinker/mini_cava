@@ -1,12 +1,7 @@
 use std::{
-    fs::File,
-    io::stdout,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread,
-    time::Duration,
+    fs::File, io::{Stdout, Write, stdout}, path::MAIN_SEPARATOR, sync::{
+        Arc, atomic::{AtomicBool, Ordering},
+    }, thread, time::Duration,
 };
 
 use anyhow::anyhow;
@@ -17,7 +12,9 @@ use cpal::{
     StreamConfig, SupportedStreamConfig,
 };
 use crossterm::{
-    event::{self, Event, KeyCode}, execute, terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    cursor, event::{self, Event, KeyCode}, execute, queue, style::{self, style}, terminal::{
+        self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    },
 };
 use log::LevelFilter;
 use ringbuf::{
@@ -52,6 +49,7 @@ type MyConsumer<T> =
 const FFT_SIZE: usize = 1024;
 const RING_CAPACITY_CPAL_FFT: usize = FFT_SIZE * 40;
 const RING_CAPACITY_FFT_UI: usize = FFT_SIZE * 40;
+const DB_MIN: f32 = -240.0;
 
 fn err_fn(err: Error) {
     match err.kind() {
@@ -62,21 +60,81 @@ fn err_fn(err: Error) {
     }
 }
 
-fn display_fft_buffer(normed_data_half: &[f32], config: StreamConfig) -> Result<(), anyhow::Error> {
-    // 定义Vec<f32>(长度FFT_SIZE)中每一个数字是一个bin(视为cava显示中的一根柱子)
-    // 每两个bin之间相隔的频率等于sample_rate / FFT_SIZE
-    let freq_atom: f32 = config.sample_rate as f32 / FFT_SIZE as f32;
-    //    debug_println!("freq_atom = {:?}", freq_atom);
+struct SpectrumRenderer {
+    stdout: Stdout,
+    width: u16,
+    height: u16,
+    stream_config: StreamConfig,
+    frame_buffer: String,
+}
 
-    // import stdout
-    let mut stdout = stdout();
+impl SpectrumRenderer {
+    pub fn new(stream_config: StreamConfig) -> Result<Self, anyhow::Error> {
+        let (width, height) = terminal::size()?;
+        let frame_buffer = String::with_capacity((width as usize + 1) * (height as usize + 1));
+        Ok(Self {
+            stdout: stdout(),
+            width,
+            height,
+            stream_config,
+            frame_buffer,
+        })
+    }
+}
+
+/// bar=柱子数=终端宽度,bin=频点(比如fft之后的Vec<f32>中每一个数就是一个bin)       
+fn display_fft_buffer(
+    normed_half_db_data: &[f32],
+    spectrum_renderer: &mut SpectrumRenderer,
+) -> Result<(), anyhow::Error> {
+    let renderer = spectrum_renderer;
+    let bars = renderer.width as usize;
+    let bins_per_bar = normed_half_db_data.len() as f32 / bars as f32;
+
+    // 每个终端列(bar)->柱高(bin display)(取该bar覆盖的bins中最大的幅值)
+    let mut all_bars_heights = vec![0usize; bars]; // !!!此处考虑错如renderer缓存,做lazyloader
+    for x in 0..bars {
+        let start_bin_index = (x as f32 * bins_per_bar) as usize;
+        let end_bin_index =
+            (((x + 1) as f32 * bins_per_bar) as usize).min(normed_half_db_data.len());
+        // 从当前bins区间找出最大的bin(!!!考虑此处改成求平均值)
+        let max_bin_value = normed_half_db_data[start_bin_index..end_bin_index]
+            .iter()
+            .fold(DB_MIN, |acc, &x| f32::max(acc, x));
+        // 归一化db数据(映射到[0.0,1.0]的区间)--->!!!!成功
+        let mapped_db = (max_bin_value + (-DB_MIN)) / (-DB_MIN);
+        // (频谱的每个bin的大小/幅值)bin的值->height(对数缩放,常数需要按照需求调整)
+        let bar_height = mapped_db * ((renderer.height - 1) as f32);
+        // debug_println!("bar_height={:?}", bar_height);
+        all_bars_heights[x] = bar_height as usize;
+    }
+
+    // 从顶部到底部逐行生成画面:col行row列,有height行
+    for col_index in (0..renderer.height.saturating_sub(1)).rev() {
+        for &bar_height in &all_bars_heights {
+            renderer
+                .frame_buffer
+                .push(if bar_height > (col_index as usize) {
+                    'O'
+                } else {
+                    ' '
+                });
+        }
+        renderer.frame_buffer.push('\n');
+    }
+
+    // 显示输出(!!!!考虑改成只打印变化的图形帧):queue!不是有输出立刻刷屏,而是攒着等flush刷屏
+    queue!(
+        renderer.stdout,
+        cursor::MoveTo(0, 0),
+        style::Print(&renderer.frame_buffer)
+    )?;
+
+    // 把stdout立刻输出
+    renderer.stdout.flush()?;
     
-    // get terminal size
-    let (width, height) = terminal::size()?;
-
-    // FFT bin 压缩到终端宽度
-    let bars = width as usize;
-    let bins_per_bar = normed_data_half.len() as f32 / bars as f32;
+    // 清空framebuffer,方便下次重新打印
+    renderer.frame_buffer.clear();
     
     Ok(())
 }
@@ -311,9 +369,10 @@ fn init_atomicbool() -> Arc<AtomicBool> {
 }
 
 fn fft_normalization(poped_data: &mut [Complex<f32>], window_sum: &f32) -> Vec<f32> {
+    // poped_data=>(因为数据对称性)截取一半数据=>(hanning window)汉宁窗处理=>转换为db数据
     poped_data[0..(poped_data.len() / 2)]
         .iter()
-        .map(|complex_data| complex_data.norm() / window_sum)
+        .map(|complex_data| 20.0 * (complex_data.norm() / window_sum).max(1e-12).log10())
         .collect()
 }
 
@@ -325,6 +384,10 @@ fn ui_worker(
 ) -> Result<(), anyhow::Error> {
     let required_samples = FFT_SIZE;
     let mut poped_data = vec![Complex::<f32>::new(0.0f32, 0.0f32); required_samples];
+    // 启动一个频谱渲染器实例
+    let mut spectrum_renderer: SpectrumRenderer =
+        SpectrumRenderer::new((*input_config).clone().into())?;
+
     loop {
         // wait for enough data to be received
         while c_b.occupied_len() < required_samples {
@@ -344,12 +407,12 @@ fn ui_worker(
         let _ = c_b.pop_slice(&mut poped_data);
 
         // fft normalization
-        let normed_data_half = fft_normalization(&mut poped_data, &window_sum);
+        let normed_half_db_data = fft_normalization(&mut poped_data, &window_sum);
 
         // debug_println!("normed_data_half.len() = {:?}", normed_data_half.len());
-        // debug_println!("normed_data = {:?}", normed_data_half);
+        // debug_println!("normed_data = {:?}", normed_half_db_data);
         // draw the ui using the "crossterm"
-        display_fft_buffer(&normed_data_half, (*input_config).into())?;
+        display_fft_buffer(&normed_half_db_data, &mut spectrum_renderer)?;
     }
     Ok(())
 }
