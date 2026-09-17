@@ -12,19 +12,19 @@ You can only change the mode by editing the `const` values in `src/main.rs` and 
 
 ### Mode 1
 
-[Mode 1](./asserts/screenshot_20260918_000642.png)
+![Mode 1](./asserts/screenshot_20260918_000642.png)
 
 ### Mode 2
 
-[Mode 2](./asserts/screenshot_20260918_000656.png)
+![Mode 2](./asserts/screenshot_20260918_000656.png)
 
 ### Mode 3
 
-[Mode 3](./asserts/screenshot_20260918_000720.png)
+![Mode 3](./asserts/screenshot_20260918_000720.png)
 
 ### Mode 4
 
-[Mode 4](./asserts/screenshot_20260918_000807.png)
+![Mode 4](./asserts/screenshot_20260918_000807.png)
 
 ## Environment
 
