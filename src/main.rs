@@ -76,8 +76,8 @@ const AUTOSENS_RISE: f32 = 0.05;   // 增益上升速度(慢,让柱子慢慢"涨
 const SENSITIVITY_MAX: f32 = 50.0; // 增益上限,防止静音时增益爆炸
 
 // 柱顶"坠格":落在柱子上方的全字符块,下落速度比柱子慢
-const CAP_SIZE: usize = 1;     // 坠格数量
-const CAP_GRAVITY: f32 = 0.01; // 坠格每帧下落高度(单位:格)
+const CAP_SIZE: usize = 8;     // 坠格高度(>=8,否则会因为没有"中填充"的unicode而闪烁)(单位:1/8 格,8 = 1 格)
+const CAP_GRAVITY: f32 = 1.0;  // 坠格每帧下落步进(单位:1/8 格)
 
 // 垂直渐变色标(底部 -> 顶部):绿 -> 黄 -> 红
 const GRADIENT: [(u8, u8, u8); 3] = [(0, 255, 0), (255, 255, 0), (255, 0, 0)];
@@ -115,7 +115,7 @@ struct SpectrumRenderer {
     frame_buffer: Vec<Cell>,          // 上一帧画面,用于 diff 渲染
     bar_ranges: Vec<(usize, usize)>,  // 每根柱对应的 FFT bin 区间(预计算,互不重叠)
     smoothed_heights: Vec<f32>,       // 每根柱平滑后的高度(单位:格)
-    cap_heights: Vec<f32>,            // 每根柱顶坠格(底部)的高度(单位:格)
+    cap_heights: Vec<f32>,            // 每根柱顶坠格(底部)的高度(单位:1/8 格)
     bar_values: Vec<f32>,             // 本帧每根柱的原始强度(0..1),供 autosens 用
     sensitivity: f32,                 // autosens 自动增益(缓变)
 }
@@ -158,39 +158,62 @@ impl SpectrumRenderer {
         Ok(())
     }
 
-    /// 更新第 x 根柱的高度(attack/decay 平滑)与其坠格,返回 (柱高, 坠格底部行)。
-    fn update_heights(&mut self, x: usize, max_height: f32) -> (f32, usize) {
+    /// 更新第 x 根柱的高度(attack/decay 平滑)与其坠格,返回 (柱高, 坠格底部位置)。
+    /// 柱高单位是"格",坠格位置单位是"1/8 格"。
+    fn update_heights(&mut self, x: usize, max_height: f32) -> (f32, f32) {
         let target = self.bar_values[x] * self.sensitivity * max_height;
         let sm = &mut self.smoothed_heights[x];
         let k = if target > *sm { ATTACK } else { DECAY };
         *sm += (target - *sm) * k;
         let bar_height = *sm;
 
+        // 坠格:柱子涨就跟上去,柱子跌就按 CAP_GRAVITY(1/8 格)步进下落
+        let bar_top = bar_height * 8.0;
         let cap = &mut self.cap_heights[x];
-        *cap = if bar_height > *cap {
-            bar_height
+        *cap = if bar_top > *cap {
+            bar_top
         } else {
-            (*cap - CAP_GRAVITY).max(bar_height)
+            (*cap - CAP_GRAVITY).max(bar_top)
         };
-        (bar_height, *cap as usize)
+        (bar_height, *cap)
     }
 
     /// 绘制第 x 根柱这一列(bar 列 + 分隔列)。
-    fn draw_bar(&mut self, x: usize, bar_height: f32, cap_bottom: usize) -> Result<(), anyhow::Error> {
+    fn draw_bar(&mut self, x: usize, bar_height: f32, cap: f32) -> Result<(), anyhow::Error> {
         let base_col = x * (BAR_WIDTH + BAR_SPACING);
+        // 坠格位置量化到整数 1/8 格
+        let cap_bottom = cap as usize;           // 坠格底部(1/8 格)
+        let cap_top = cap_bottom + CAP_SIZE; // 坠格顶部(1/8 格),CAP_SIZE 单位是 1/8 格
         for row in 0..self.height {
             let dist = (self.height - 1 - row) as usize; // 距底部的行数
-            // 该行属于坠格吗?(坠格是柱顶上方 CAP_SIZE 个满块)
-            let in_cap = cap_bottom > 0 && dist >= cap_bottom && dist < cap_bottom + CAP_SIZE;
-            // 柱子在该行的 1/8 填充(坠格行由满块覆盖)
+            let cell_bottom = dist * 8; // 本行底部(1/8 格)
+            let cell_top = cell_bottom + 8; // 本行顶部(1/8 格)
+
+            // 坠格与本行 [cell_bottom, cell_top) 的交集;cap_bottom>0 是静音守卫
+            let lo = cap_bottom.max(cell_bottom);
+            let hi = cap_top.min(cell_top);
+            let cap_ch = if cap_bottom > 0 && lo < hi {
+                if hi == cell_top {
+                    // 坠格底边(或满格):从本行顶部向下填充(上块,精确到 1/8)
+                    upper_block(cell_top - lo)
+                } else {
+                    // 坠格顶边:从本行底部向上填充(下块,精确到 1/8)
+                    block_char(hi - cell_bottom)
+                }
+            } else {
+                ' '
+            };
+
+            // 柱子在该行的 1/8 填充
             let filled = (bar_height * 8.0) as usize;
             let filled = filled.saturating_sub(dist * 8).min(8);
 
-            let ch = if in_cap { '█' } else { block_char(filled) };
+            let ch = if cap_ch != ' ' { cap_ch } else { block_char(filled) };
             let color = if ch == ' ' {
                 Color::Reset
+            } else if cap_ch != ' ' {
+                gradient_color(1.0) // 坠格恒为峰值色(红)
             } else {
-                // 渐变按"这根柱子自身"的高度归一化:柱底绿、柱顶红。
                 gradient_color(dist as f32 / bar_height.max(f32::EPSILON))
             };
 
@@ -238,6 +261,26 @@ fn block_char(level: usize) -> char {
         ' '
     } else {
         LOWER_BLOCKS[level - 1]
+    }
+}
+
+/// 从单元格「顶部向下填充」的块字符(用于坠格的底边)。
+/// 1..=8 档精确对应 U+2594 / U+1FB82~1FB86 / U+2580 / U+2588,做到 1/8 格精度。
+fn upper_block(fill: usize) -> char {
+    const UPPER_BLOCKS: [char; 8] = [
+        '\u{2594}',  // 1/8 UPPER ONE EIGHTH BLOCK
+        '\u{1fb82}', // 2/8 UPPER ONE QUARTER BLOCK
+        '\u{1fb83}', // 3/8 UPPER THREE EIGHTHS BLOCK
+        '\u{2580}',  // 4/8 UPPER HALF BLOCK
+        '\u{1fb84}', // 5/8 UPPER FIVE EIGHTHS BLOCK
+        '\u{1fb85}', // 6/8 UPPER THREE QUARTERS BLOCK
+        '\u{1fb86}', // 7/8 UPPER SEVEN EIGHTHS BLOCK
+        '\u{2588}',  // 8/8 FULL BLOCK
+    ];
+    if fill == 0 {
+        ' '
+    } else {
+        UPPER_BLOCKS[fill - 1]
     }
 }
 
@@ -291,8 +334,8 @@ fn display_fft_buffer(
 
     // 第二遍:平滑 + 坠格 + 绘制每一列
     for x in 0..bars {
-        let (bar_height, cap_bottom) = renderer.update_heights(x, max_height);
-        renderer.draw_bar(x, bar_height, cap_bottom)?;
+        let (bar_height, cap) = renderer.update_heights(x, max_height);
+        renderer.draw_bar(x, bar_height, cap)?;
     }
 
     // 把本帧 diff 一次性刷出

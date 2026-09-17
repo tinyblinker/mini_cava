@@ -49,9 +49,14 @@ Press =q= to quit.
 - Attack/decay smoothing: bars rise fast and fall slowly instead of jumping
 
 ** Peak cap and color
-- Each bar can carry =CAP_SIZE= full-block "cap" cells on top (currently 0,
-  i.e. disabled); they ride up with the bar but fall more slowly, leaving a
-  floating peak behind
+- Each bar carries a cap of =CAP_SIZE= 1/8-cells on top; they ride up with the
+  bar but fall more slowly, leaving a floating peak behind
+- Cap position and fall step are measured in 1/8 cells, so the cap descends
+  smoothly as partial sub-blocks instead of snapping whole cells
+- The cap's top edge uses lower blocks and its bottom edge uses the full upper
+  block set (U+2594 / U+1FB82..1FB86 / U+2580 / U+2588), so it stays a clean
+  rectangle at exact 1/8-cell precision with no trailing ghosting
+- The cap is always drawn in the peak color (top of the gradient, red)
 - Per-bar vertical gradient (green -> yellow -> red), normalized to each bar's
   own smoothed height so every bar runs the full gradient regardless of size
 
@@ -68,8 +73,8 @@ Key constants in =src/main.rs=:
 | =HIGHER_CUTOFF_FREQ= | 10000.0               | highest bar frequency (Hz)       |
 | =AUTOSENS_RISE=      | 0.05                  | autosens gain rise speed         |
 | =SENSITIVITY_MAX=    | 50.0                  | autosens gain cap                |
-| =CAP_SIZE=           | 0                     | number of falling peak cells (0 = off) |
-| =CAP_GRAVITY=        | 0.1                   | peak-cell fall speed (cells/frame) |
+| =CAP_SIZE=           | 4                     | cap height in 1/8 cells (8 = 1 cell) |
+| =CAP_GRAVITY=        | 1.0                   | cap fall step in 1/8 cells           |
 | =BAR_WIDTH=          | 1                     | bar width in columns             |
 | =BAR_SPACING=        | 0                     | gap between bars in columns      |
 | =GRADIENT=           | green -> yellow -> red | vertical color stops           |
