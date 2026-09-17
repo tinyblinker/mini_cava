@@ -50,7 +50,8 @@ Press =q= to quit.
 
 ** Peak cap and color
 - Each bar carries a cap of =CAP_SIZE= 1/8-cells on top; they ride up with the
-  bar but fall more slowly, leaving a floating peak behind
+  bar but fall more slowly, leaving a floating peak that drops all the way to
+  the bottom row (and rests there until the bar rises again)
 - Cap position and fall step are measured in 1/8 cells, so the cap descends
   smoothly as partial sub-blocks instead of snapping whole cells
 - The cap's top edge uses lower blocks and its bottom edge uses the full upper
