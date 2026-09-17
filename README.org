@@ -1,81 +1,95 @@
 #+TITLE: cava_plus_plus
 #+AUTHOR: shyweeds
 
-A terminal audio spectrum visualizer in Rust, similar to cava.
+A small terminal audio spectrum visualizer in Rust. It is like
+[[https://github.com/karlstav/cava][cava]].
+
+/NOTE: This is a toy project. It is not finished. Many features are
+missing. Use it for fun and learning only./
+
+* Demo
+
+mini_cava can show 4 display modes. The 4 videos below show each mode.
+
+You can only change the mode by editing the =const= values in
+=src/main.rs= and rebuilding. There is no runtime switch yet.
+
+** Mode 1
+[[file:./asserts/2026-09-17 23-22-41.mp4]]
+
+** Mode 2
+[[file:./asserts/2026-09-17 23-25-16.mp4]]
+
+** Mode 3
+[[file:./asserts/2026-09-17 23-26-25.mp4]]
+
+** Mode 4
+[[file:./asserts/2026-09-17 23-27-30.mp4]]
+
+** Backup image
+If the videos do not play, this image shows how it looks:
+
+#+ATTR_ORG: :width 640
+[[file:./asserts/screenshot_20260917_234035.png]]
+
+* Environment
+
+This project was only tested on:
+
+- Arch Linux
+- PipeWire (only, no PulseAudio or JACK)
+
+It reads audio from the PipeWire =default_sink= monitor. It may not work
+on other systems.
 
 * Dependencies
-- Rust (nightly / edition 2024)
-- System libraries: =pkgconf=, =pipewire=, =alsa-lib=, =clang=
-- Audio input: the =default_sink= monitor source of PipeWire
 
-Install system dependencies (Arch Linux):
+- Rust (nightly, edition 2024)
+- System libraries: =pkgconf=, =pipewire=, =alsa-lib=, =clang=
+
+Install on Arch Linux:
 
 #+begin_src sh
 ./install_deps.sh
 #+end_src
 
-* Build and Run
+* Build and run
+
 #+begin_src sh
 cargo run
 #+end_src
 
 Press =q= to quit.
 
-* Implementation
-** Audio pipeline
-- =cpal= captures audio from the PipeWire =default_sink= monitor
-  -> =ringbuf= ring buffer -> =rustfft= FFT
-- FFT window size is 1024, with a Hanning window applied; stereo is downmixed
-  to mono (= (L+R)/2 =)
-- Magnitudes are converted to dB: =20 * log10(norm / window_sum)=
+* How it works
 
-** Rendering (=crossterm=)
-- Draws spectrum bars frame by frame in the alternate screen (press =q= to quit)
-- Absolute cursor positioning (no reliance on newlines; avoids misalignment
-  when =OPOST= is off in raw mode)
-- Each bar is 1 column wide with no gap between bars (=BAR_WIDTH= /=BAR_SPACING=)
-- Lazy rendering: only cells whose char/color differ from the previous frame
-  are redrawn
-
-** Bar height calculation
-- Log-frequency mapping covering ~=40 Hz= to =10 kHz= (cava-style), so bars
-  represent audible musical content instead of the empty ultrasonic range
-- Bar-to-bin ranges are precomputed once (=build_bar_ranges=), capped to the
-  available FFT bins and made strictly non-overlapping, so no two bars share a
-  bin (otherwise low-frequency bars collapse into identical trends)
-- Per-bar value = max magnitude over its frequency range, then mapped:
-  dB -> [0,1] (=DB_FLOOR=-60 dB floor) -> gravity power curve
-- Autosens: a slowly-adapting gain normalizes so the tallest bar peaks at the top
-- Attack/decay smoothing: bars rise fast and fall slowly instead of jumping
-
-** Peak cap and color
-- Each bar carries a cap of =CAP_SIZE= 1/8-cells on top; they ride up with the
-  bar but fall more slowly, leaving a floating peak that drops all the way to
-  the bottom row (and rests there until the bar rises again)
-- Cap position and fall step are measured in 1/8 cells, so the cap descends
-  smoothly as partial sub-blocks instead of snapping whole cells
-- The cap's top edge uses lower blocks and its bottom edge uses the full upper
-  block set (U+2594 / U+1FB82..1FB86 / U+2580 / U+2588), so it stays a clean
-  rectangle at exact 1/8-cell precision with no trailing ghosting
-- The cap is always drawn in the peak color (top of the gradient, red)
-- Per-bar vertical gradient (green -> yellow -> red), normalized to each bar's
-  own smoothed height so every bar runs the full gradient regardless of size
+- =cpal= (PipeWire host) captures the =default_sink= monitor.
+- Samples go through a ring buffer, then =rustfft= does an FFT.
+- FFT size is 1024, with a Hanning window. Stereo is mixed to mono.
+- Magnitudes become dB: =20 * log10(norm / window_sum)=.
+- =crossterm= draws the bars on the alternate screen.
+- Bars use a log-frequency scale from 40 Hz to 15 kHz.
+- Bars rise fast and fall slow (attack/decay smoothing).
+- =autosens= scales the gain so the tallest bar reaches the top.
+- Each bar has a peak cap that falls slowly.
+- Bar color is a gradient: green -> yellow -> red.
 
 * Tuning
-Key constants in =src/main.rs=:
 
-| Constant             | Default               | Meaning                          |
-|----------------------+-----------------------+----------------------------------|
-| =FFT_SIZE=           | 1024                  | FFT window size                  |
-| =DB_FLOOR=           | -60.0                 | dB floor for the height mapping  |
-| =GRAVITY=            | 1.3                   | power curve (>1 droops quiet bars) |
-| =ATTACK= / =DECAY=   | 0.9 / 0.05            | bar rise / fall speed            |
-| =LOWER_CUTOFF_FREQ=  | 40.0                  | lowest bar frequency (Hz)        |
-| =HIGHER_CUTOFF_FREQ= | 10000.0               | highest bar frequency (Hz)       |
-| =AUTOSENS_RISE=      | 0.05                  | autosens gain rise speed         |
-| =SENSITIVITY_MAX=    | 50.0                  | autosens gain cap                |
-| =CAP_SIZE=           | 4                     | cap height in 1/8 cells (8 = 1 cell) |
-| =CAP_GRAVITY=        | 1.0                   | cap fall step in 1/8 cells           |
-| =BAR_WIDTH=          | 1                     | bar width in columns             |
-| =BAR_SPACING=        | 0                     | gap between bars in columns      |
-| =GRADIENT=           | green -> yellow -> red | vertical color stops           |
+Change these =const= values in =src/main.rs=:
+
+| Constant             | Default                 | Meaning                          |
+|----------------------+-------------------------+----------------------------------|
+| =FFT_SIZE=           | 1024                    | FFT window size                  |
+| =DB_FLOOR=           | -60.0                   | dB floor for bar height          |
+| =GRAVITY=            | 1.2                     | power curve (>1 drops quiet bars) |
+| =ATTACK= / =DECAY=   | 1.0 / 0.08              | bar rise / fall speed            |
+| =LOWER_CUTOFF_FREQ=  | 40.0                    | lowest bar frequency (Hz)        |
+| =HIGHER_CUTOFF_FREQ= | 15000.0                 | highest bar frequency (Hz)       |
+| =AUTOSENS_RISE=      | 0.05                    | autosens gain rise speed         |
+| =SENSITIVITY_MAX=    | 50.0                    | autosens gain cap                |
+| =CAP_SIZE=           | 8                       | peak cap height (1/8 cells, 8 = 1 cell) |
+| =CAP_GRAVITY=        | 1.0                     | peak cap fall step (1/8 cells)   |
+| =BAR_WIDTH=          | 1                       | bar width (columns)              |
+| =BAR_SPACING=        | 0                       | gap between bars (columns)       |
+| =GRADIENT=           | green -> yellow -> red  | vertical color stops             |
