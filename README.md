@@ -12,25 +12,19 @@ You can only change the mode by editing the `const` values in `src/main.rs` and 
 
 ### Mode 1
 
-[Mode 1 video](./asserts/2026-09-17%2023-22-41.mp4)
+[Mode 1](./asserts/screenshot_20260918_000642.png)
 
 ### Mode 2
 
-[Mode 2 video](./asserts/2026-09-17%2023-25-16.mp4)
+[Mode 2](./asserts/screenshot_20260918_000656.png)
 
 ### Mode 3
 
-[Mode 3 video](./asserts/2026-09-17%2023-26-25.mp4)
+[Mode 3](./asserts/screenshot_20260918_000720.png)
 
 ### Mode 4
 
-[Mode 4 video](./asserts/2026-09-17%2023-27-30.mp4)
-
-### Backup image
-
-If the videos do not play, this image shows how it looks:
-
-![Backup demo](./asserts/screenshot_20260917_234035.png)
+[Mode 4](./asserts/screenshot_20260918_000807.png)
 
 ## Environment
 
