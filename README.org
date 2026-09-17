@@ -33,21 +33,25 @@ Press =q= to quit.
 - Draws spectrum bars frame by frame in the alternate screen (press =q= to quit)
 - Absolute cursor positioning (no reliance on newlines; avoids misalignment
   when =OPOST= is off in raw mode)
-- Each bar is 3 columns wide, with 1 empty column between bars
+- Each bar is 1 column wide with no gap between bars (=BAR_WIDTH= /=BAR_SPACING=)
 - Lazy rendering: only cells whose char/color differ from the previous frame
   are redrawn
 
 ** Bar height calculation
 - Log-frequency mapping covering ~=40 Hz= to =10 kHz= (cava-style), so bars
   represent audible musical content instead of the empty ultrasonic range
+- Bar-to-bin ranges are precomputed once (=build_bar_ranges=), capped to the
+  available FFT bins and made strictly non-overlapping, so no two bars share a
+  bin (otherwise low-frequency bars collapse into identical trends)
 - Per-bar value = max magnitude over its frequency range, then mapped:
   dB -> [0,1] (=DB_FLOOR=-60 dB floor) -> gravity power curve
 - Autosens: a slowly-adapting gain normalizes so the tallest bar peaks at the top
 - Attack/decay smoothing: bars rise fast and fall slowly instead of jumping
 
 ** Peak cap and color
-- Each bar carries 2 full-block "cap" cells on top; they ride up with the bar
-  but fall more slowly, leaving a floating peak behind
+- Each bar can carry =CAP_SIZE= full-block "cap" cells on top (currently 0,
+  i.e. disabled); they ride up with the bar but fall more slowly, leaving a
+  floating peak behind
 - Per-bar vertical gradient (green -> yellow -> red), normalized to each bar's
   own smoothed height so every bar runs the full gradient regardless of size
 
@@ -58,14 +62,14 @@ Key constants in =src/main.rs=:
 |----------------------+-----------------------+----------------------------------|
 | =FFT_SIZE=           | 1024                  | FFT window size                  |
 | =DB_FLOOR=           | -60.0                 | dB floor for the height mapping  |
-| =GRAVITY=            | 1.5                   | power curve (>1 droops quiet bars) |
-| =ATTACK= / =DECAY=   | 0.4 / 0.05            | bar rise / fall speed            |
+| =GRAVITY=            | 1.3                   | power curve (>1 droops quiet bars) |
+| =ATTACK= / =DECAY=   | 0.9 / 0.05            | bar rise / fall speed            |
 | =LOWER_CUTOFF_FREQ=  | 40.0                  | lowest bar frequency (Hz)        |
 | =HIGHER_CUTOFF_FREQ= | 10000.0               | highest bar frequency (Hz)       |
 | =AUTOSENS_RISE=      | 0.05                  | autosens gain rise speed         |
 | =SENSITIVITY_MAX=    | 50.0                  | autosens gain cap                |
-| =CAP_SIZE=           | 2                     | number of falling peak cells     |
-| =CAP_GRAVITY=        | 0.15                  | peak-cell fall speed (cells/frame) |
-| =BAR_WIDTH=          | 3                     | bar width in columns             |
-| =BAR_SPACING=        | 1                     | gap between bars in columns      |
+| =CAP_SIZE=           | 0                     | number of falling peak cells (0 = off) |
+| =CAP_GRAVITY=        | 0.1                   | peak-cell fall speed (cells/frame) |
+| =BAR_WIDTH=          | 1                     | bar width in columns             |
+| =BAR_SPACING=        | 0                     | gap between bars in columns      |
 | =GRADIENT=           | green -> yellow -> red | vertical color stops           |
