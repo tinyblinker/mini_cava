@@ -69,9 +69,16 @@ Press `q` to quit.
 - `autosens` uses cava's multiplicative gain (overshoot detection) to keep the
   tallest bar near the top without amplifying the noise floor during silence.
 - Optional `monstercat` / `waves` filters blend neighbouring bars.
+- A damped-oscillator spring animates each bar toward its target, overshooting
+  and bouncing back (non-linear rebound) instead of moving monotonically.
 - Each bar has a peak cap that falls slowly.
 - Bar color is an HSV rainbow gradient: hue sweeps continuously from
   `GRADIENT_START_HUE` (bottom) to `GRADIENT_END_HUE` (top).
+- The gradient's palette continuously cycles over time: a running hue phase
+  rotates both `GRADIENT_START_HUE` and `GRADIENT_END_HUE` together, and the
+  cycling speed is set by the smoothed audio intensity (`INTENSITY_SMOOTHING`),
+  from a slow idle rate (`HUE_CYCLE_BASE_SPEED`) up to a fast rate at full
+  intensity (`HUE_CYCLE_INTENSITY_SPEED`).
 - Full cells use the half-block `▀` with the top half in the foreground colour
   and the bottom half in the background colour, giving half-cell gradient steps.
 
@@ -83,19 +90,25 @@ Change these `const` values in `src/main.rs`:
 | -------------------- | ----------------------- | ----------------------------------------- |
 | `FFT_SIZE`           | 1024                    | FFT window size                           |
 | `DB_FLOOR`           | -60.0                   | dB floor for bar height                   |
-| `GRAVITY`            | 1.2                     | power curve (>1 drops quiet bars)         |
+| `GRAVITY`            | 1.5                     | power curve (>1 drops quiet bars)         |
 | `NOISE_REDUCTION`    | 0.77                    | noise-reduction strength (0..1]           |
 | `FRAMERATE`          | 60.0                    | nominal frame rate for smoothing/autosens |
 | `AUTOSENS`           | 1.0                     | autosens gain rise speed                  |
 | `MONSTERCAT`         | 0.0                     | monstercat neighbour smoothing (0 = off)  |
 | `WAVES`              | 0                       | waves neighbour smoothing (0 = off)       |
+| `SPRING_STIFFNESS`   | 0.16                    | spring stiffness (higher = harder/faster) |
+| `SPRING_DAMPING`     | 0.70                    | spring damping (lower = more bounce)      |
+| `BAR_AMPLITUDE`      | 1.2                     | bar height multiplier (>1 = taller)       |
+| `INTENSITY_SMOOTHING`| 0.08                    | intensity envelope smoothing (lower=slower) |
+| `HUE_CYCLE_BASE_SPEED`| 0.3                    | idle palette spin speed (deg/frame)       |
+| `HUE_CYCLE_INTENSITY_SPEED`| 3.0               | extra spin speed at full intensity (deg/frame) |
 | `LOWER_CUTOFF_FREQ`  | 40.0                    | lowest bar frequency (Hz)                 |
 | `HIGHER_CUTOFF_FREQ` | 13000.0                 | highest bar frequency (Hz)                |
 | `CAP_SIZE`           | 0                       | peak cap height (1/8 cells, 8 = 1 cell)   |
 | `CAP_GRAVITY`        | 1.0                     | peak cap fall step (1/8 cells)            |
-| `BAR_WIDTH`          | 2                       | bar width (columns)                       |
+| `BAR_WIDTH`          | 3                       | bar width (columns)                       |
 | `BAR_SPACING`        | 1                       | gap between bars (columns)                |
 | `GRADIENT_START_HUE` | 0.0                     | gradient hue at the bottom (deg)          |
-| `GRADIENT_END_HUE`   | 360.0                   | gradient hue at the top (deg)             |
+| `GRADIENT_END_HUE`   | 240.0                   | gradient hue at the top (deg)             |
 | `GRADIENT_SAT`       | 1.0                     | gradient saturation (0..1)                |
 | `GRADIENT_VAL`       | 1.0                     | gradient value/brightness (0..1)          |

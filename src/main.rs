@@ -59,13 +59,13 @@ const FFT_SIZE: usize = 1024;
 const RING_CAPACITY_CPAL_FFT: usize = FFT_SIZE * 40;
 const RING_CAPACITY_FFT_UI: usize = FFT_SIZE * 40;
 // —— 频谱显示参数 ——
-const BAR_WIDTH: usize = 3; // 每根柱子的列宽(字符)
-const BAR_SPACING: usize = 1; // 柱子之间的空隙列数
+const BAR_WIDTH: usize = 1; // 每根柱子的列宽(字符)
+const BAR_SPACING: usize = 0; // 柱子之间的空隙列数
 const DB_FLOOR: f32 = -60.0; // 动态范围下限(dB):柱高映射到 [-60, 0] dB
-const GRAVITY: f32 = 1.5; // 幂次曲线:>1 让小声柱子相对更矮,高低差更明显
+const GRAVITY: f32 = 1.5; // 幂次曲线:>1 让小声柱子相对更矮,高低差更明显(建议 1.0~1.5;越小小声柱子越高、摆动越"满")
 
 // —— cava 式降噪/平滑参数(对齐 cava 默认配置)——
-const NOISE_REDUCTION: f32 = 0.77; // 降噪强度(0..1],越大杂波越少、柱子越"糊"(cava 默认 77%)
+const NOISE_REDUCTION: f32 = 0.77; // 降噪强度(0..1],越大杂波越少、柱子越"糊"(cava 默认 77%;建议 0.6~0.85,越小柱子动得越"活")
 const FRAMERATE: f32 = 60.0; // 标称帧率,用于平滑/autosens 的时域归一(cava 默认 60)
 const AUTOSENS: f32 = 1.0; // autosens 增益抬升速度(cava 默认 1)
 const MONSTERCAT: f32 = 0.0; // monstercat 邻柱平滑系数,0=关闭(cava 默认 0)
@@ -77,7 +77,7 @@ const LOWER_CUTOFF_FREQ: f32 = 40.0;
 const HIGHER_CUTOFF_FREQ: f32 = 13000.0;
 
 // 柱顶"坠格":落在柱子上方的全字符块,下落速度比柱子慢
-const CAP_SIZE: usize = 0; // 坠格高度(>=8或0,否则会因为没有"中填充"的unicode而闪烁)(单位:1/8 格,8 = 1 格)
+const CAP_SIZE: usize = 8; // 坠格高度(>=8或0,否则会因为没有"中填充"的unicode而闪烁)(单位:1/8 格,8 = 1 格)
 const CAP_GRAVITY: f32 = 1.0; // 坠格每帧下落步进(单位:1/8 格)
 
 // 垂直渐变:HSV 彩虹,颜色随高度连续扫过色相(底部 -> 顶部)
@@ -85,6 +85,38 @@ const GRADIENT_START_HUE: f32 = 0.0; // 底部色相(度),0 = 红
 const GRADIENT_END_HUE: f32 = 240.0; // 顶部色相(度),360 = 红(整圈彩虹)
 const GRADIENT_SAT: f32 = 1.0; // 饱和度(0..1)
 const GRADIENT_VAL: f32 = 1.0; // 明度(0..1)
+
+// —— 弹簧动画参数(阻尼谐振子,非线性回弹)——
+// 叠加在 cava 平滑之上:cava 平滑先产出"目标值"(0..1),弹簧再逐帧向目标逼近并回弹.
+// 每帧按 dt=1 积分一次(UI 帧率 ≈ 采样率/FFT_SIZE,近似恒定,故用每帧系数即可).
+//   恢复力(线性弹簧): force = SPRING_STIFFNESS * (target - pos)
+//   阻尼(速度衰减):   vel   = (vel + force) * SPRING_DAMPING
+//   积分:             pos  += vel
+// 建议:
+//   SPRING_STIFFNESS 越大柱子越"硬"、响应越快(0.05 很软 / 0.40 很硬),默认 0.16;
+//   SPRING_DAMPING   越小震荡越久、回弹越明显(0.70 明显回弹 / 0.95 几乎一次到位),默认 0.86;
+//   想更"脆":DAMPING→0.80、STIFFNESS→0.25;想更"软绵":反向调.
+const SPRING_STIFFNESS: f32 = 0.16;
+const SPRING_DAMPING: f32 = 0.70;
+
+// 柱高幅度倍率:>1 让柱子整体更高、摆动更大(配合弹簧过冲,直接增大"变化幅度").
+// 建议 1.0~1.5;>1.2 时高柱会常顶到屏幕顶部被截断,属正常.
+const BAR_AMPLITUDE: f32 = 1.2;
+
+// —— 整体"激烈程度" -> 渐变调色板循环变色 ——
+// 维护一个累积相位 hue_phase,随时间持续旋转,声音越激烈转得越快:
+//   speed      = HUE_CYCLE_BASE_SPEED + intensity * HUE_CYCLE_INTENSITY_SPEED
+//   hue_phase  = (hue_phase + speed) % 360
+//   start_hue  = GRADIENT_START_HUE + hue_phase
+//   end_hue    = GRADIENT_END_HUE   + hue_phase
+// 跨度恒为 (END - START),整条调色板一起绕色环旋转.
+// 建议(单位:度/帧,UI 帧率 ≈ 采样率/FFT_SIZE ≈ 47):
+//   INTENSITY_SMOOTHING 控制激烈程度的平滑快慢(0.05 慢 / 0.30 快),默认 0.08;
+//   HUE_CYCLE_BASE_SPEED 静音时的慢速循环(0 = 静止),默认 0.3(约 25 秒转一圈);
+//   HUE_CYCLE_INTENSITY_SPEED 满激烈度时额外加速,默认 3.0(约 2.5 秒转一圈).
+const INTENSITY_SMOOTHING: f32 = 0.08;
+const HUE_CYCLE_BASE_SPEED: f32 = 7.0;
+const HUE_CYCLE_INTENSITY_SPEED: f32 = 9.0;
 
 fn err_fn(err: Error) {
     match err.kind() {
@@ -125,9 +157,10 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
 }
 
 /// 根据高度比例 t(0=底部,1=顶部)取垂直渐变颜色:HSV 彩虹,随高度连续扫过色相.
-fn gradient_color(t: f32) -> Color {
+/// `start_hue` / `end_hue` 是底部/顶部色相(两者会随整体激烈程度一起旋转,见 display_fft_buffer).
+fn gradient_color(t: f32, start_hue: f32, end_hue: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
-    let hue = GRADIENT_START_HUE + (GRADIENT_END_HUE - GRADIENT_START_HUE) * t;
+    let hue = start_hue + (end_hue - start_hue) * t;
     let (r, g, b) = hsv_to_rgb(hue, GRADIENT_SAT, GRADIENT_VAL);
     Color::Rgb { r, g, b }
 }
@@ -147,6 +180,12 @@ struct SpectrumRenderer {
     bar_mem: Vec<f32>,  // integral 低通的记忆项
     bar_peak: Vec<f32>, // 当前"峰值"(下落曲线的起点)
     prev_bar: Vec<f32>, // 上一帧柱值(判断涨/跌)
+    // —— 弹簧动画状态(阻尼谐振子)——
+    spring_pos: Vec<f32>, // 弹簧当前位置(0..1,允许越过目标产生回弹)
+    spring_vel: Vec<f32>, // 弹簧当前速度
+    // —— 整体激烈程度(平滑后 0..1),用于控制渐变调色板循环速度 ——
+    intensity: f32, // 平滑后的激烈程度
+    hue_phase: f32, // 调色板累积相位(0..360,随时间旋转)
 }
 
 impl SpectrumRenderer {
@@ -179,6 +218,10 @@ impl SpectrumRenderer {
             bar_mem: vec![0.0; bars],
             bar_peak: vec![0.0; bars],
             prev_bar: vec![0.0; bars],
+            spring_pos: vec![0.0; bars],
+            spring_vel: vec![0.0; bars],
+            intensity: 0.0,
+            hue_phase: 0.0,
         })
     }
 
@@ -206,11 +249,24 @@ impl SpectrumRenderer {
         Ok(())
     }
 
-    /// 更新第 x 根柱的高度与其坠格,返回 (柱高, 坠格底部位置).
-    /// 柱高单位是"格",坠格位置单位是"1/8 格".
-    /// 柱值已含 cava 平滑与 autosens(见 apply_cava_smoothing),这里直接映射到格.
+    /// 弹簧积分一步(阻尼谐振子),更新第 x 根柱的弹簧状态,返回归一化位置(允许 >1 或 <0).
+    /// 目标 = cava 平滑后的柱值 × 幅度倍率;阻尼 <1 时在目标上下过冲、来回震荡,即"非线性回弹".
+    fn step_spring(&mut self, x: usize) -> f32 {
+        // 目标:cava 平滑后的柱值 × 幅度倍率(内部允许 >1,渲染时再 clamp)
+        let target = self.bar_values[x] * BAR_AMPLITUDE;
+
+        let pos = &mut self.spring_pos[x];
+        let vel = &mut self.spring_vel[x];
+        *vel = (*vel + SPRING_STIFFNESS * (target - *pos)) * SPRING_DAMPING;
+        *pos += *vel;
+        *pos
+    }
+
+    /// 由弹簧位置计算第 x 根柱的渲染柱高与坠格,返回 (柱高, 坠格底部位置).
+    /// 柱高单位是"格",坠格位置单位是"1/8 格".不在此处积分弹簧(见 step_spring).
     fn update_heights(&mut self, x: usize, max_height: f32) -> (f32, f32) {
-        let bar_height = self.bar_values[x].clamp(0.0, 1.0) * max_height;
+        // 渲染高度:钳制到 [0,1](内部 pos 可越过目标产生回弹,也可略微 <0 产生"压底"回弹)
+        let bar_height = self.spring_pos[x].clamp(0.0, 1.0) * max_height;
 
         // 坠格:柱子涨就跟上去(并激活),柱子跌就按 CAP_GRAVITY(1/8 格)步进下落,
         // 可一路落到屏幕最底行(cap = 0).
@@ -225,18 +281,17 @@ impl SpectrumRenderer {
         (bar_height, self.cap_heights[x])
     }
 
-    /// cava 式降噪平滑 + autosens(移植自 cava 的 cava_execute):
-    /// 对每根柱做 falloff(平滑下落)+ integral(降噪低通),钳制到 [0,1],
-    /// 并根据是否 overshoot 用乘法式更新 autosens 增益.
-    fn apply_cava_smoothing(&mut self, silence: bool) {
+    /// cava 式降噪平滑(移植自 cava 的 cava_execute,不含 autosens):
+    /// 对每根柱做 falloff(平滑下落)+ integral(降噪低通),结果作为弹簧的目标值.
+    /// 不在此处钳制/判定 overshoot——autosens 改在回弹之后(见 update_autosens).
+    fn apply_cava_smoothing(&mut self) {
         let bars = self.bar_values.len();
         let framerate_mod = 66.0 / FRAMERATE;
         let gravity_mod = framerate_mod.powf(2.5) * 2.0 / NOISE_REDUCTION;
         let integral_mod = framerate_mod.powf(0.1);
 
-        let mut overshoot = false;
         for x in 0..bars {
-            // 先乘 autosens 增益(增益把柱值推到 [0,1] 附近,超了就是 overshoot)
+            // 先乘 autosens 增益(把柱值推到 [0,1] 附近)
             let mut v = self.bar_values[x] * self.sensitivity;
 
             // falloff:柱子下跌时按二次曲线平滑下落,而非瞬间跌
@@ -256,14 +311,14 @@ impl SpectrumRenderer {
             v = self.bar_mem[x] * NOISE_REDUCTION / integral_mod + v;
             self.bar_mem[x] = v;
 
-            if v > 1.0 {
-                overshoot = true;
-                v = 1.0;
-            }
-            self.bar_values[x] = v;
+            self.bar_values[x] = v; // 不钳制,弹簧 + 渲染阶段再 clamp
         }
+    }
 
-        // autosens:乘法式缓变增益(cava 做法)
+    /// cava 式 autosens:根据回弹后的柱子是否"满格"(pos > 1.0)用乘法式调整增益.
+    /// 静音时不抬增益;overshoot 时回缩,使最高柱回弹后刚好接近但不长期满格.
+    fn update_autosens(&mut self, silence: bool, overshoot: bool) {
+        let framerate_mod = 66.0 / FRAMERATE;
         if overshoot {
             self.sensitivity *= 1.0 - 0.02 * framerate_mod;
         } else if !silence {
@@ -322,7 +377,14 @@ impl SpectrumRenderer {
     }
 
     /// 绘制第 x 根柱这一列(bar 列 + 分隔列).
-    fn draw_bar(&mut self, x: usize, bar_height: f32, cap: f32) -> Result<(), anyhow::Error> {
+    fn draw_bar(
+        &mut self,
+        x: usize,
+        bar_height: f32,
+        cap: f32,
+        start_hue: f32,
+        end_hue: f32,
+    ) -> Result<(), anyhow::Error> {
         let base_col = x * (BAR_WIDTH + BAR_SPACING);
         // 坠格位置量化到整数 1/8 格
         let cap_bottom = cap as usize; // 坠格底部(1/8 格)
@@ -360,15 +422,27 @@ impl SpectrumRenderer {
             // 确定 (字符, 前景色, 背景色)
             let (ch, fg, bg) = if cap_ch != ' ' {
                 // 坠格:峰值色(渐变顶端),背景复位
-                (cap_ch, gradient_color(1.0), Color::Reset)
+                (
+                    cap_ch,
+                    gradient_color(1.0, start_hue, end_hue),
+                    Color::Reset,
+                )
             } else if filled == 0 {
                 (' ', Color::Reset, Color::Reset)
             } else if filled == 8 {
                 // 满格:上半格前景色 + 下半格背景色,一格显示两种颜色(半格渐变)
-                ('▀', gradient_color(t_top), gradient_color(t_bottom))
+                (
+                    '▀',
+                    gradient_color(t_top, start_hue, end_hue),
+                    gradient_color(t_bottom, start_hue, end_hue),
+                )
             } else {
                 // 顶格部分填充:1/8 块(单前景色,保留细腻柱顶),背景复位
-                (block_char(filled), gradient_color(t_fill_top), Color::Reset)
+                (
+                    block_char(filled),
+                    gradient_color(t_fill_top, start_hue, end_hue),
+                    Color::Reset,
+                )
             };
 
             for offset in 0..BAR_WIDTH {
@@ -455,7 +529,7 @@ fn compute_bar_value(data: &[f32], range: (usize, usize)) -> f32 {
 }
 
 /// 用 crossterm 绘制频谱条.
-/// 流程:原始强度 -> cava 降噪平滑 + autosens -> 邻柱平滑 -> 柱高 + 坠格 -> 渐变着色.
+/// 流程:原始强度 -> cava 降噪平滑 -> 邻柱平滑 -> 弹簧回弹 -> 回弹后判定 autosens -> 渐变着色.
 fn display_fft_buffer(
     normed_half_mag_data: &[f32],
     renderer: &mut SpectrumRenderer,
@@ -476,16 +550,37 @@ fn display_fft_buffer(
     // 静音判定:整帧几乎无能量时,autosens 不抬增益(避免把底噪顶满)
     let silence = frame_max < 1e-6;
 
-    // cava 式降噪平滑 + autosens(内含 overshoot 检测与增益调整)
-    renderer.apply_cava_smoothing(silence);
+    // 整体"激烈程度":取本帧原始柱值的均值,EMA 平滑(用于控制调色板循环速度)
+    let intensity_target = renderer.bar_values[..bars].iter().sum::<f32>() / bars as f32;
+    renderer.intensity += (intensity_target - renderer.intensity) * INTENSITY_SMOOTHING;
+
+    // 调色板相位:随时间持续旋转,速度随激烈程度(基础慢速 + 激烈度加速)
+    let speed = HUE_CYCLE_BASE_SPEED + renderer.intensity * HUE_CYCLE_INTENSITY_SPEED;
+    renderer.hue_phase = (renderer.hue_phase + speed).rem_euclid(360.0);
+    let start_hue = GRADIENT_START_HUE + renderer.hue_phase;
+    let end_hue = GRADIENT_END_HUE + renderer.hue_phase;
+
+    // cava 式降噪平滑(产出弹簧目标值,不含 autosens)
+    renderer.apply_cava_smoothing();
 
     // 可选:monstercat / waves 邻柱平滑
     renderer.apply_monstercat_filter();
 
+    // 弹簧积分,并基于"回弹后的高度"判定是否满格(overshoot)
+    let mut overshoot = false;
+    for x in 0..bars {
+        if renderer.step_spring(x) > 1.0 {
+            overshoot = true;
+        }
+    }
+
+    // autosens 依据回弹后的满格情况调整增益
+    renderer.update_autosens(silence, overshoot);
+
     // 第二遍:柱高 + 坠格 + 绘制每一列
     for x in 0..bars {
         let (bar_height, cap) = renderer.update_heights(x, max_height);
-        renderer.draw_bar(x, bar_height, cap)?;
+        renderer.draw_bar(x, bar_height, cap, start_hue, end_hue)?;
     }
 
     // 把本帧 diff 一次性刷出
