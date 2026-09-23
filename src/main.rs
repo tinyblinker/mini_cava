@@ -77,7 +77,7 @@ const LOWER_CUTOFF_FREQ: f32 = 40.0;
 const HIGHER_CUTOFF_FREQ: f32 = 13000.0;
 
 // 柱顶"坠格":落在柱子上方的全字符块,下落速度比柱子慢
-const CAP_SIZE: usize = 8; // 坠格高度(>=8或0,否则会因为没有"中填充"的unicode而闪烁)(单位:1/8 格,8 = 1 格)
+const CAP_SIZE: usize = 0; // 坠格高度(>=8或0,否则会因为没有"中填充"的unicode而闪烁)(单位:1/8 格,8 = 1 格)
 const CAP_GRAVITY: f32 = 1.0; // 坠格每帧下落步进(单位:1/8 格)
 
 // 垂直渐变:HSV 彩虹,颜色随高度连续扫过色相(底部 -> 顶部)
@@ -115,8 +115,8 @@ const BAR_AMPLITUDE: f32 = 1.2;
 //   HUE_CYCLE_BASE_SPEED 静音时的慢速循环(0 = 静止),默认 0.3(约 25 秒转一圈);
 //   HUE_CYCLE_INTENSITY_SPEED 满激烈度时额外加速,默认 3.0(约 2.5 秒转一圈).
 const INTENSITY_SMOOTHING: f32 = 0.08;
-const HUE_CYCLE_BASE_SPEED: f32 = 7.0;
-const HUE_CYCLE_INTENSITY_SPEED: f32 = 9.0;
+const HUE_CYCLE_BASE_SPEED: f32 = 5.0;
+const HUE_CYCLE_INTENSITY_SPEED: f32 = 11.0;
 
 fn err_fn(err: Error) {
     match err.kind() {
